@@ -1,0 +1,20 @@
+# Debug screenshots
+*.png
+*.jpg
+*.jpeg
+
+# Skills library tarball (large binary - deploy separately)
+cockpit-skills-library.tar.gz
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+*.env
