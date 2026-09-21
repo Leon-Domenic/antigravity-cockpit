@@ -37,7 +37,8 @@ Flask web dashboard — the main control plane.
 - Fleet management: start / stop / rename / remove containers via Proxmox API
 - Task Dispatcher: type a prompt (+ drag-and-drop screenshots) into any agent
 - Broadcast Mode: send the same task to all running agents simultaneously  
-- Skills Hub: push skills from a 72-skill library to any agent's `~/.gemini/skills/`
+- Skills Hub: two-way capability manager — push skills to any agent's `~/.gemini/skills/`, download/export skills to `.zip` / `.tar.gz`, or import new skills via drag & drop
+- **Workspaces**: Import your project directly into the Cockpit, browse files in the built-in Code Inspector, deploy to any agent with one click, and pull agent changes back
 - Add new agents — choose engine type: Antigravity, Codex, Hermes Agent, Open Claw
 - Real-time status polling: CPU, RAM, auth state, busy/idle
 - Three dark UI themes: **Onyx Stealth**, **Cobalt Hyperdrive**, **Tokyo Neon**
@@ -55,6 +56,11 @@ Flask REST API running on each agent container.
 | `GET /logs` | Tail the Antigravity language_server log |
 | `GET /skills` | List installed skills |
 | `POST /skills/install` | Install a skill from the library |
+| `GET /skills/<name>/export` | Export and download an installed skill from the agent |
+| `POST /workspace/deploy` | Unpack a project archive into `/home/ubuntu/workspace` |
+| `GET /workspace/status` | Report active workspace name, file count, and size |
+| `GET /workspace/export` | Export current workspace as base64 tar.gz for Cockpit pull |
+| `POST /workspace/clean` | Clear the agent workspace (preserves `/media`) |
 
 ### `agent/antigravity_injector.py`
 
@@ -148,3 +154,77 @@ Diagnostic and setup utilities used during development:
 - **`scrot`**: use `-o` flag to overwrite existing files (`scrot -z -o /tmp/file.png`).
 - **Auth tokens**: stored at `/root/.gemini/jetski-standalone-oauth-token` (JSON).
 - **CDP port**: changes on every Antigravity restart — always re-read from `DevToolsActivePort`.
+
+---
+
+## Workspaces
+
+The **Workspaces** feature lets you import any codebase directly into the Cockpit and push it live into your AI agent containers.
+
+### How it works
+
+```
+Your Project (ZIP / Git Repo / Template)
+   │
+   ▼
+Cockpit Workspaces Store (/usr/local/share/cockpit/workspaces/<ws-id>/)
+   │  File tree browser, Code Inspector, tech stack detection, stats
+   │
+   ├── Deploy ──► Agent Bridge POST /workspace/deploy
+   │              Unpacks to /home/ubuntu/workspace (ubuntu:ubuntu)
+   │              Writes .cockpit_workspace.json manifest
+   │
+   ├── Pull  ◄── Agent Bridge GET /workspace/export
+   │              Returns base64 tar.gz of agent workspace state
+   │
+   └── Task Dispatcher automatically prefixes prompt:
+       "[Active Project Workspace]: /home/ubuntu/workspace
+        (Project: <name>, Stack: <stack>, <N> files)"
+```
+
+### Import methods
+
+| Method | How |
+|---|---|
+| **Upload archive** | Drag & drop a `.zip`, `.tar.gz`, or `.tar` file onto the drop zone. GitHub/GitLab zips (with single root folder) are auto-flattened. |
+| **Git clone** | Paste any HTTPS/SSH repo URL (+ optional branch). Uses `git clone --depth 1`. |
+| **Starter template** | Pick React/Vite+TS, Node.js/Express, Python/Flask, or Blank and the Cockpit scaffolds it instantly. |
+
+### Cockpit API endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/workspaces` | `GET` | List all stored workspaces with stats |
+| `/api/workspaces/upload` | `POST` | Upload a project archive (multipart or base64 JSON) |
+| `/api/workspaces/git_clone` | `POST` | Clone a Git repository |
+| `/api/workspaces/create_template` | `POST` | Scaffold a starter template |
+| `/api/workspaces/<id>/tree` | `GET` | Return file-tree JSON for the Code Inspector |
+| `/api/workspaces/<id>/file` | `GET` | Read a file's content (path-traversal protected) |
+| `/api/workspaces/<id>/deploy` | `POST` | Package & deploy workspace to agent(s) |
+| `/api/workspaces/<id>/pull` | `POST` | Pull updated files back from an agent |
+| `/api/workspaces/<id>/download` | `GET` | Stream a `.zip` download to the browser |
+| `/api/workspaces/<id>/rename` | `POST` | Rename/re-describe a workspace |
+| `/api/workspaces/<id>` | `DELETE` | Remove workspace and all files |
+
+### Agent Bridge workspace endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/workspace/deploy` | `POST` | Receives `{"archive": "<b64_tar_gz>", "workspace_name": "...", "workspace_id": "...", "clean_first": false}`. Extracts to `/home/ubuntu/workspace`, sets `ubuntu:ubuntu` ownership, writes `.cockpit_workspace.json`. |
+| `/workspace/status` | `GET` | Returns active workspace ID, name, file count, size, deploy timestamp. |
+| `/workspace/export` | `GET` | Streams back a base64 tar.gz of the current agent workspace (excludes `.git`, `node_modules`, `__pycache__`). |
+| `/workspace/clean` | `POST` | Removes all items from the agent workspace (preserves the `media/` subfolder). |
+
+### Tech stack detection
+
+The Cockpit auto-detects the primary language/framework by inspecting:
+- `package.json` → React, Vue, Next.js, Svelte, Express, or Node.js
+- `requirements.txt` / `pyproject.toml` / `.py` files → Python
+- `Cargo.toml` → Rust
+- `go.mod` → Go
+- `index.html` (fallback) → HTML5/Frontend
+
+### Agent workspace path
+
+Project files land at **`/home/ubuntu/workspace`** (symlinked / mirrored to `/root/workspace`) so both the `ubuntu` GUI desktop and root shell tools can reach them. The installer script (`agent/install_antigravity_agent.sh`) creates this directory and sets proper ownership automatically.
+
