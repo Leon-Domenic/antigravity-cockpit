@@ -9,6 +9,18 @@ PROXMOX_API = f"https://{PROXMOX_HOST}:8006/api2/json"
 
 # SKILLS PATH & REPOSITORY RESOLUTION
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+try:
+    from ceo import (
+        ROLE_DEFINITIONS, ROLES_BY_ID, get_role_spec, match_role_for_task,
+        get_chain_of_command, CeoOrchestrator, WorkOrder, CeoHeartbeatSupervisor
+    )
+except Exception as e:
+    print(f"[Warning] Failed to import CEO module: {e}")
+    ROLE_DEFINITIONS, ROLES_BY_ID = [], {}
+    CeoOrchestrator, CeoHeartbeatSupervisor = None, None
 LOCAL_SKILLS_DIR = os.path.join(SCRIPT_DIR, "skills_library")
 SYSTEM_SKILLS_DIR = "/usr/local/share/cockpit/skills_library"
 
@@ -97,11 +109,11 @@ def get_library_skills(force_refresh=False):
 AGENTS_CONFIG_FILE = "/usr/local/share/cockpit/agents_config.json"
 
 DEFAULT_AGENTS = [
-    {"id": "agent-1", "vmid": 151, "name": "Agent 1", "type": "antigravity", "role": "Frontend Specialist", "ip": "192.168.178.169", "port": 8000, "vnc_port": 6080},
-    {"id": "agent-2", "vmid": 152, "name": "Agent 2", "type": "antigravity", "role": "Backend Specialist",  "ip": "192.168.178.170", "port": 8000, "vnc_port": 6080},
-    {"id": "agent-3", "vmid": 153, "name": "Codex",   "type": "codex",       "role": "Code Synthesis & Refactor", "ip": "192.168.178.171", "port": 8000, "vnc_port": 6080},
-    {"id": "agent-4", "vmid": 154, "name": "Hermes Agent", "type": "hermes", "role": "Reasoning & Function Calling", "ip": "192.168.178.172", "port": 8000, "vnc_port": 6080},
-    {"id": "agent-5", "vmid": 155, "name": "Open Claw", "type": "openclaw",  "role": "Autonomous Web Scraper & Crawler", "ip": "192.168.178.173", "port": 8000, "vnc_port": 6080}
+    {"id": "agent-1", "vmid": 151, "name": "Agent 1", "type": "antigravity", "vm_type": "lxc",  "role": "Frontend Specialist", "ip": "192.168.178.169", "port": 8000, "vnc_port": 6080},
+    {"id": "agent-2", "vmid": 152, "name": "Agent 2", "type": "antigravity", "vm_type": "lxc",  "role": "Backend Specialist",  "ip": "192.168.178.170", "port": 8000, "vnc_port": 6080},
+    {"id": "agent-3", "vmid": 153, "name": "Codex",   "type": "codex",       "vm_type": "lxc",  "role": "Code Synthesis & Refactor", "ip": "192.168.178.171", "port": 8000, "vnc_port": 6080},
+    {"id": "agent-4", "vmid": 154, "name": "Hermes Agent", "type": "hermes", "vm_type": "qemu", "role": "Reasoning & Function Calling", "ip": "192.168.178.172", "port": 8000, "vnc_port": 6080},
+    {"id": "agent-5", "vmid": 155, "name": "Open Claw", "type": "openclaw",  "vm_type": "qemu", "role": "Autonomous Web Scraper & Crawler", "ip": "192.168.178.173", "port": 8000, "vnc_port": 6080}
 ]
 
 AGENTS = list(DEFAULT_AGENTS)
@@ -116,12 +128,16 @@ def load_agents_config():
                     for a in saved:
                         if "type" not in a:
                             a["type"] = "antigravity"
+                        if "vm_type" not in a:
+                            a["vm_type"] = "qemu" if a.get("type") in ["hermes", "openclaw"] else "lxc"
                     AGENTS = saved
         except Exception as e:
             print("Failed to load agents_config.json", e)
     for a in AGENTS:
         if "type" not in a:
-            a["type"] = "antigravity" 
+            a["type"] = "antigravity"
+        if "vm_type" not in a:
+            a["vm_type"] = "qemu" if a.get("type") in ["hermes", "openclaw"] else "lxc" 
 
 def save_agents_config():
     try:
@@ -541,6 +557,15 @@ HTML_TEMPLATE = """
                 </div>
                 <span id="nav-workspaces-badge" class="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono border" style="background: var(--badge-bg); color: var(--badge-text); border-color: var(--border-base);">
                     0 Projects
+                </span>
+            </button>
+            <button onclick="openCeoModal()" id="nav-btn-ceo" class="w-full flex items-center justify-between px-3.5 py-2 rounded-xl transition text-xs font-semibold border" style="border-color: var(--border-base); background-color: var(--bg-input); color: var(--text-main);" title="CEO Executive Suite & Fleet Orchestration">
+                <div class="flex items-center gap-2.5">
+                    <span class="text-sm">👑</span>
+                    <span>Executive Suite</span>
+                </div>
+                <span id="nav-ceo-badge" class="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono border" style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; border-color: rgba(245, 158, 11, 0.3);">
+                    CEO
                 </span>
             </button>
         </div>
@@ -1258,11 +1283,16 @@ HTML_TEMPLATE = """
                 <div>
                     <div class="flex justify-between items-center mb-2.5">
                         <h4 class="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
-                            <i class="fa-solid fa-layer-group text-indigo-400"></i> Step 1: Select What It Will Be
+                            <i class="fa-solid fa-layer-group text-indigo-400"></i> Step 1: Select Engine Architecture
                         </h4>
                         <span class="text-[10px] text-slate-300 font-mono font-medium" id="selected-engine-badge-preview">Selected: Antigravity</span>
                     </div>
-                    <div class="grid grid-cols-2 sm:grid-cols-5 gap-2.5" id="add-engine-cards">
+                    <div class="grid grid-cols-2 sm:grid-cols-6 gap-2.5" id="add-engine-cards">
+                        <!-- Populated by JS -->
+                    </div>
+
+                    <!-- DYNAMIC REQUIREMENTS & HARDWARE SPECS CARD -->
+                    <div id="engine-specs-card" class="mt-3 p-3.5 rounded-xl border transition-all" style="background-color: var(--bg-card); border-color: var(--border-base);">
                         <!-- Populated by JS -->
                     </div>
                 </div>
@@ -1273,7 +1303,7 @@ HTML_TEMPLATE = """
                     <div>
                         <div class="flex justify-between items-center mb-2.5">
                             <h4 class="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
-                                <i class="fa-solid fa-server text-blue-400"></i> Option A: Launch Standby Fleet Container (PVE)
+                                <i class="fa-solid fa-server text-blue-400"></i> Option A: Launch Standby Fleet Node (PVE)
                             </h4>
                             <span class="text-[10px] text-emerald-400 font-mono font-semibold flex items-center gap-1">
                                 <i class="fa-solid fa-bolt"></i> ~1.5s Fast Launch
@@ -1288,16 +1318,36 @@ HTML_TEMPLATE = """
                     <div class="pt-4 border-t space-y-3" style="border-color: var(--border-base);">
                         <div class="flex justify-between items-center">
                             <h4 class="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
-                                <i class="fa-solid fa-network-wired text-purple-400"></i> Option B: Connect Fresh Linux VM or Node
+                                <i class="fa-solid fa-network-wired text-purple-400"></i> Option B: Deploy New Agent Node
                             </h4>
-                            <span class="text-[10px] text-slate-400 font-mono">Any Debian / Ubuntu</span>
+                            <span class="text-[10px] text-slate-400 font-mono">Proxmox VE 8.x / Debian 12 / Ubuntu 22.04+</span>
                         </div>
+
+                        <!-- Proxmox Host 1-Click Provisioning Command -->
+                        <div class="p-3.5 rounded-xl border space-y-2" style="background-color: rgba(99, 102, 241, 0.06); border-color: rgba(99, 102, 241, 0.25);">
+                            <div class="flex items-center justify-between">
+                                <div class="text-[11px] font-semibold text-indigo-300 flex items-center gap-1.5">
+                                    <i class="fa-solid fa-terminal text-indigo-400"></i> Proxmox Host 1-Click Provisioner (Auto-Creates VM or LXC):
+                                </div>
+                                <span class="text-[10px] font-mono text-indigo-400/80">root@pve (192.168.178.105)</span>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <input id="pve-provision-cmd" readonly type="text" value="" class="flex-1 input-box rounded-lg px-3 py-2 text-xs font-mono text-indigo-200 select-all border" style="background-color: var(--bg-base); border-color: var(--border-base);">
+                                <button onclick="navigator.clipboard.writeText(document.getElementById('pve-provision-cmd').value); alert('Proxmox provision command copied to clipboard!');" class="px-3 py-2 btn-action-primary rounded-lg text-xs font-semibold flex items-center gap-1.5 flex-shrink-0">
+                                    <i class="fa-solid fa-copy"></i> Copy PVE Command
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Inside Guest Installer -->
                         <div class="p-3.5 rounded-xl border space-y-2" style="background-color: var(--bg-input); border-color: var(--border-base);">
-                            <div class="text-[11px] text-slate-300">Run this command inside any fresh VM/container to install the agent stack configured for the chosen engine:</div>
+                            <div class="text-[11px] text-slate-300 flex items-center gap-1.5">
+                                <i class="fa-solid fa-download text-amber-400"></i> Or run inside guest terminal (Self-installs dependencies, engine & bridge):
+                            </div>
                             <div class="flex items-center gap-2">
                                 <input id="dynamic-install-cmd" readonly type="text" value="curl -sSL http://192.168.178.168:3000/install.sh | bash" class="flex-1 input-box rounded-lg px-3 py-2 text-xs font-mono text-amber-300 select-all border" style="background-color: var(--bg-base); border-color: var(--border-base);">
-                                <button onclick="navigator.clipboard.writeText(document.getElementById('dynamic-install-cmd').value); alert('Command copied to clipboard!');" class="px-3 py-2 btn-action-primary rounded-lg text-xs font-semibold flex items-center gap-1.5 flex-shrink-0">
-                                    <i class="fa-solid fa-copy"></i> Copy
+                                <button onclick="navigator.clipboard.writeText(document.getElementById('dynamic-install-cmd').value); alert('Installer command copied to clipboard!');" class="px-3 py-2 btn-action-primary rounded-lg text-xs font-semibold flex items-center gap-1.5 flex-shrink-0">
+                                    <i class="fa-solid fa-copy"></i> Copy Guest Command
                                 </button>
                             </div>
                         </div>
@@ -1305,10 +1355,14 @@ HTML_TEMPLATE = """
                         <!-- Register Node Form -->
                         <div class="p-4 rounded-xl border space-y-3" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
                             <span class="text-xs font-semibold text-white">Register Node in Cockpit:</span>
-                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <div class="grid grid-cols-1 sm:grid-cols-4 gap-2">
                                 <input id="new-agent-name" type="text" placeholder="Agent Name (e.g. Codex-Node)" class="input-box rounded-lg px-3 py-1.5 text-xs text-white">
                                 <input id="new-agent-role" type="text" placeholder="Role (e.g. Code Synthesis)" class="input-box rounded-lg px-3 py-1.5 text-xs text-white">
                                 <input id="new-agent-ip" type="text" placeholder="IP (e.g. 192.168.178.174)" class="input-box rounded-lg px-3 py-1.5 text-xs text-white font-mono">
+                                <select id="new-agent-virt-type" class="input-box rounded-lg px-3 py-1.5 text-xs text-white font-mono bg-slate-900 border border-slate-700">
+                                    <option value="lxc">Proxmox LXC Container (lxc)</option>
+                                    <option value="qemu">KVM Virtual Machine (qemu)</option>
+                                </select>
                             </div>
                             <div class="flex justify-end">
                                 <button onclick="registerNewCustomAgent()" class="px-4 py-1.5 btn-action-primary font-semibold rounded-xl text-xs transition shadow-lg flex items-center gap-1.5">
@@ -1327,16 +1381,6 @@ HTML_TEMPLATE = """
             </div>
         </div>
     </div>
-            </div>
-
-            <div class="px-6 py-3 border-t flex justify-end" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
-                <button onclick="closeAddAgentModal()" class="px-4 py-1.5 border rounded-xl text-xs font-medium transition" style="background-color: var(--bg-input); border-color: var(--border-base); color: var(--text-main);">
-                    Close
-                </button>
-            </div>
-        </div>
-    </div>
-
 
     <!-- ============================================================ -->
     <!-- IMAGE PREVIEW LIGHTBOX MODAL                                 -->
@@ -1349,6 +1393,7 @@ HTML_TEMPLATE = """
             <img id="lightbox-img" src="" class="max-w-full max-h-[82vh] rounded-2xl border border-slate-700 shadow-2xl object-contain">
             <div id="lightbox-caption" class="text-xs text-slate-300 font-mono mt-2 text-center"></div>
         </div>
+    </div>
     <!-- ============================================================ -->
     <!-- WORKSPACES HUB MODAL                                         -->
     <!-- ============================================================ -->
@@ -1857,6 +1902,343 @@ HTML_TEMPLATE = """
             </div>
         </div>
     </div>
+    <!-- ============================================================ -->
+    <!-- CEO EXECUTIVE SUITE & FLEET ORCHESTRATOR MODAL (PAPERCLIP)     -->
+    <!-- ============================================================ -->
+    <div id="ceo-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md hidden">
+        <div class="glass w-full max-w-6xl rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[92vh] border" style="background-color: var(--bg-card); border-color: var(--border-base);">
+            
+            <!-- Modal Header -->
+            <div class="px-6 py-4 border-b flex flex-wrap items-center justify-between gap-3 flex-shrink-0" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-xl border flex items-center justify-center text-xl shadow-inner" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        👑
+                    </div>
+                    <div>
+                        <h2 class="text-base font-bold text-white tracking-tight flex items-center gap-2">
+                            Executive Suite & Fleet Orchestrator
+                            <span class="px-2 py-0.5 rounded-full text-[10px] font-mono border" style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; border-color: rgba(245, 158, 11, 0.3);">
+                                Paperclip Architecture
+                            </span>
+                        </h2>
+                        <p class="text-xs text-slate-400">Hierarchical task delegation, role-based subagent routing & autonomous heartbeat maintenance</p>
+                    </div>
+                </div>
+
+                <!-- Heartbeat Controls & Close Button -->
+                <div class="flex items-center gap-3">
+                    <span id="ceo-heartbeat-badge" class="flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-mono font-bold border" style="background: rgba(16, 185, 129, 0.12); color: #10b981; border-color: rgba(16, 185, 129, 0.3);">
+                        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                        Heartbeat #<span id="ceo-pulse-counter">1</span>
+                    </span>
+                    <button onclick="triggerCeoPulse()" id="btn-ceo-pulse" class="px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border hover:border-rose-400/50" style="background-color: var(--bg-input); border-color: var(--border-base); color: var(--text-main);" title="Trigger immediate CEO Heartbeat checklist">
+                        <i class="fa-solid fa-heart-pulse text-rose-400"></i>
+                        <span>Pulse Now</span>
+                    </button>
+                    <button onclick="closeCeoModal()" class="w-8 h-8 rounded-full flex items-center justify-center transition border hover:opacity-80" style="background-color: var(--bg-input); border-color: var(--border-base); color: var(--text-main);">
+                        <i class="fa-solid fa-xmark text-sm"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Executive Summary Alert Banner -->
+            <div class="px-6 py-2.5 border-b flex items-center justify-between text-xs flex-shrink-0" style="background: rgba(245, 158, 11, 0.05); border-color: var(--border-base);">
+                <div class="flex items-center gap-2.5 overflow-hidden">
+                    <span class="px-2 py-0.5 rounded text-[10px] font-bold font-mono uppercase bg-amber-500/20 text-amber-300 border border-amber-500/30">CEO Memo</span>
+                    <span id="ceo-summary-banner" class="text-slate-300 font-medium truncate">CEO Orchestrator active. Standing by for Board Directives.</span>
+                </div>
+                <div class="text-[11px] text-slate-500 font-mono flex-shrink-0 ml-4 flex items-center gap-2">
+                    <span id="ceo-last-pulse-time">Updated just now</span>
+                </div>
+            </div>
+
+            <!-- Navigation Tabs & P&L Velocity Metrics -->
+            <div class="px-6 pt-3 border-b flex flex-wrap items-center justify-between gap-4 flex-shrink-0" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                <div class="flex space-x-1" id="ceo-tab-nav">
+                    <button onclick="switchCeoTab('kanban')" id="ceo-tab-btn-kanban" class="px-4 py-2 border-b-2 text-xs font-bold transition flex items-center gap-2" style="border-color: var(--accent-primary); color: var(--highlight-text);">
+                        <i class="fa-solid fa-table-columns"></i>
+                        <span>Work Orders Kanban</span>
+                        <span id="badge-total-tasks" class="px-1.5 py-0.2 rounded-full text-[10px] bg-white/10">0</span>
+                    </button>
+                    <button onclick="switchCeoTab('org')" id="ceo-tab-btn-org" class="px-4 py-2 border-b-2 border-transparent text-xs font-bold transition text-slate-400 hover:text-white flex items-center gap-2">
+                        <i class="fa-solid fa-sitemap"></i>
+                        <span>Org Chart & Roles</span>
+                    </button>
+                    <button onclick="switchCeoTab('heartbeat')" id="ceo-tab-btn-heartbeat" class="px-4 py-2 border-b-2 border-transparent text-xs font-bold transition text-slate-400 hover:text-white flex items-center gap-2">
+                        <i class="fa-solid fa-clipboard-check"></i>
+                        <span>Heartbeat & Audit</span>
+                    </button>
+                    <button onclick="switchCeoTab('charter')" id="ceo-tab-btn-charter" class="px-4 py-2 border-b-2 border-transparent text-xs font-bold transition text-slate-400 hover:text-white flex items-center gap-2">
+                        <i class="fa-solid fa-scroll"></i>
+                        <span>CEO Operating Charter</span>
+                    </button>
+                </div>
+
+                <!-- High-level Velocity Counters -->
+                <div class="flex items-center gap-2 pb-2">
+                    <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-mono" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        <span class="text-slate-400">Velocity:</span>
+                        <span id="metric-velocity" class="font-bold text-emerald-400">100%</span>
+                    </div>
+                    <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-mono" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        <span class="text-blue-400 font-bold" id="metric-in-progress">0</span> <span class="text-slate-400">active</span>
+                    </div>
+                    <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-mono" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        <span class="text-rose-400 font-bold" id="metric-blocked">0</span> <span class="text-slate-400">blocked</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Modal Body (Scrollable Tab Contents) -->
+            <div class="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin" style="background-color: var(--bg-card);">
+
+                <!-- BOARD DIRECTIVE CONSOLE (Always Visible at Top) -->
+                <div class="p-4 rounded-2xl border space-y-3 relative overflow-hidden shadow-sm" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                            <span class="text-amber-400 font-normal">👑</span> Board Directive Console (Give Orders to CEO)
+                        </span>
+                        <span class="text-[11px] text-slate-500 font-mono">CEO decomposes & delegates to specialized agents</span>
+                    </div>
+                    
+                    <div class="flex flex-col md:flex-row gap-3">
+                        <div class="flex-1 relative">
+                            <textarea id="ceo-directive-input" rows="2" placeholder="e.g. Build an authentication system with Convex backend and Clerk auth, design modern responsive UI with Tailwind, and test with Vitest..." class="w-full px-3.5 py-2.5 rounded-xl border text-xs font-sans text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-400 scrollbar-thin resize-none" style="background-color: var(--bg-card); border-color: var(--border-base);"></textarea>
+                        </div>
+                        <div class="flex flex-row md:flex-col justify-between gap-2 md:w-56 flex-shrink-0">
+                            <select id="ceo-ws-select" class="w-full px-2.5 py-1.5 rounded-lg border text-xs font-sans text-slate-200 focus:outline-none" style="background-color: var(--bg-card); border-color: var(--border-base);">
+                                <option value="">Target Workspace: None</option>
+                            </select>
+                            <div class="flex gap-2">
+                                <select id="ceo-priority-select" class="w-1/2 px-2 py-1.5 rounded-lg border text-xs font-sans text-slate-200 focus:outline-none" style="background-color: var(--bg-card); border-color: var(--border-base);">
+                                    <option value="urgent">Urgent</option>
+                                    <option value="high" selected>High</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="low">Low</option>
+                                </select>
+                                <button onclick="submitBoardDirective()" id="btn-submit-directive" class="w-1/2 px-3 py-1.5 rounded-lg text-xs font-bold text-white transition flex items-center justify-center gap-1.5 shadow-md hover:brightness-110" style="background: linear-gradient(135deg, #f59e0b, #d97706);">
+                                    <i class="fa-solid fa-bolt"></i>
+                                    <span>Delegate</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB 1: WORK ORDERS KANBAN -->
+                <div id="ceo-view-kanban" class="space-y-4">
+                    <div class="grid grid-cols-1 md:grid-cols-5 gap-3.5">
+                        
+                        <!-- Col 1: Todo / Queued -->
+                        <div class="flex flex-col rounded-2xl border p-3 min-h-[360px]" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                            <div class="flex items-center justify-between pb-2 mb-2 border-b" style="border-color: var(--border-base);">
+                                <span class="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                                    <span class="w-2 h-2 rounded-full bg-slate-400"></span> Queued / Todo
+                                </span>
+                                <span id="col-count-todo" class="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-white/10 text-slate-300">0</span>
+                            </div>
+                            <div id="kanban-col-todo" class="flex-1 space-y-2.5 overflow-y-auto scrollbar-thin"></div>
+                        </div>
+
+                        <!-- Col 2: In Progress -->
+                        <div class="flex flex-col rounded-2xl border p-3 min-h-[360px]" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                            <div class="flex items-center justify-between pb-2 mb-2 border-b" style="border-color: var(--border-base);">
+                                <span class="text-xs font-bold text-blue-400 flex items-center gap-1.5">
+                                    <span class="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span> In Progress
+                                </span>
+                                <span id="col-count-in_progress" class="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30">0</span>
+                            </div>
+                            <div id="kanban-col-in_progress" class="flex-1 space-y-2.5 overflow-y-auto scrollbar-thin"></div>
+                        </div>
+
+                        <!-- Col 3: In Review (Acceptance Gate) -->
+                        <div class="flex flex-col rounded-2xl border p-3 min-h-[360px]" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                            <div class="flex items-center justify-between pb-2 mb-2 border-b" style="border-color: var(--border-base);">
+                                <span class="text-xs font-bold text-purple-400 flex items-center gap-1.5">
+                                    <span class="w-2 h-2 rounded-full bg-purple-500"></span> In Review
+                                </span>
+                                <span id="col-count-in_review" class="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">0</span>
+                            </div>
+                            <div id="kanban-col-in_review" class="flex-1 space-y-2.5 overflow-y-auto scrollbar-thin"></div>
+                        </div>
+
+                        <!-- Col 4: Blocked / Escalated -->
+                        <div class="flex flex-col rounded-2xl border p-3 min-h-[360px]" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                            <div class="flex items-center justify-between pb-2 mb-2 border-b" style="border-color: var(--border-base);">
+                                <span class="text-xs font-bold text-rose-400 flex items-center gap-1.5">
+                                    <span class="w-2 h-2 rounded-full bg-rose-500"></span> Blocked / Board
+                                </span>
+                                <span id="col-count-blocked" class="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30">0</span>
+                            </div>
+                            <div id="kanban-col-blocked" class="flex-1 space-y-2.5 overflow-y-auto scrollbar-thin"></div>
+                        </div>
+
+                        <!-- Col 5: Done -->
+                        <div class="flex flex-col rounded-2xl border p-3 min-h-[360px]" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                            <div class="flex items-center justify-between pb-2 mb-2 border-b" style="border-color: var(--border-base);">
+                                <span class="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                                    <span class="w-2 h-2 rounded-full bg-emerald-500"></span> Done
+                                </span>
+                                <span id="col-count-done" class="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">0</span>
+                            </div>
+                            <div id="kanban-col-done" class="flex-1 space-y-2.5 overflow-y-auto scrollbar-thin"></div>
+                        </div>
+
+                    </div>
+                </div>
+
+                <!-- TAB 2: ORG CHART & FLEET ROLES -->
+                <div id="ceo-view-org" class="space-y-6 hidden">
+                    
+                    <!-- Hierarchy Tree Visualizer -->
+                    <div class="p-5 rounded-2xl border space-y-4" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                        <div class="flex justify-between items-center">
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                                <i class="fa-solid fa-sitemap text-amber-400"></i> Chain of Command & Reporting Hierarchy
+                            </h3>
+                            <span class="text-[11px] text-slate-500">Paperclip Leadership Doctrine</span>
+                        </div>
+
+                        <div class="flex flex-col items-center space-y-3 py-2 font-sans">
+                            <!-- Board Level -->
+                            <div class="px-5 py-2.5 rounded-xl border flex items-center gap-3 shadow-md" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                                <span class="text-lg">👤</span>
+                                <div>
+                                    <div class="text-xs font-bold text-white">Human Board of Directors</div>
+                                    <div class="text-[10px] text-slate-400">Sets high-level company goals, budget & approvals</div>
+                                </div>
+                            </div>
+                            <div class="w-0.5 h-6 bg-slate-600"></div>
+
+                            <!-- CEO Level -->
+                            <div class="px-5 py-2.5 rounded-xl border flex items-center gap-3 shadow-md border-amber-500/40 bg-amber-500/10">
+                                <span class="text-lg">👑</span>
+                                <div>
+                                    <div class="text-xs font-bold text-amber-300">CEO (Antigravity Fleet Orchestrator)</div>
+                                    <div class="text-[10px] text-amber-200/80">Never codes. Owns triage, decomposition, delegation & heartbeat maintenance</div>
+                                </div>
+                            </div>
+                            <div class="w-0.5 h-6 bg-slate-600"></div>
+
+                            <!-- Department Leads & Specialists -->
+                            <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 w-full pt-1">
+                                <div class="p-3 rounded-xl border text-center space-y-1" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                                    <div class="text-base">🏛️</div>
+                                    <div class="text-[11px] font-bold text-white">CTO</div>
+                                    <div class="text-[9px] text-slate-400">Architecture & Standards</div>
+                                </div>
+                                <div class="p-3 rounded-xl border text-center space-y-1" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                                    <div class="text-base">🎨</div>
+                                    <div class="text-[11px] font-bold text-white">Frontend</div>
+                                    <div class="text-[9px] text-slate-400">React, Tailwind, UI/UX</div>
+                                </div>
+                                <div class="p-3 rounded-xl border text-center space-y-1" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                                    <div class="text-base">⚡</div>
+                                    <div class="text-[11px] font-bold text-white">Backend</div>
+                                    <div class="text-[9px] text-slate-400">Convex, APIs, Auth</div>
+                                </div>
+                                <div class="p-3 rounded-xl border text-center space-y-1" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                                    <div class="text-base">💻</div>
+                                    <div class="text-[11px] font-bold text-white">Codex</div>
+                                    <div class="text-[9px] text-slate-400">Refactoring & Synthesis</div>
+                                </div>
+                                <div class="p-3 rounded-xl border text-center space-y-1" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                                    <div class="text-base">🧠</div>
+                                    <div class="text-[11px] font-bold text-white">Hermes</div>
+                                    <div class="text-[9px] text-slate-400">Reasoning & Multi-Tool</div>
+                                </div>
+                                <div class="p-3 rounded-xl border text-center space-y-1" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                                    <div class="text-base">🛡️</div>
+                                    <div class="text-[11px] font-bold text-white">QA Lead</div>
+                                    <div class="text-[9px] text-slate-400">Tests & Verification</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Fleet Agent Role Assignment Table -->
+                    <div class="p-5 rounded-2xl border space-y-4" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                                    <i class="fa-solid fa-users-gear text-blue-400"></i> Fleet Containers & Assigned Roles
+                                </h3>
+                                <p class="text-[11px] text-slate-500">Configure organizational assignments for your Proxmox agent containers</p>
+                            </div>
+                        </div>
+
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-xs border-collapse">
+                                <thead>
+                                    <tr class="border-b text-[10px] uppercase font-bold text-slate-400 tracking-wider" style="border-color: var(--border-base);">
+                                        <th class="py-2.5 px-3">Agent</th>
+                                        <th class="py-2.5 px-3">Container</th>
+                                        <th class="py-2.5 px-3">IP / Engine</th>
+                                        <th class="py-2.5 px-3">Assigned Role</th>
+                                        <th class="py-2.5 px-3">Live Status</th>
+                                        <th class="py-2.5 px-3">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="ceo-fleet-roles-tbody" class="divide-y divide-white/5"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB 3: HEARTBEAT & AUDIT -->
+                <div id="ceo-view-heartbeat" class="space-y-4 hidden">
+                    <div class="p-4 rounded-2xl border space-y-3" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                        <div class="flex justify-between items-center">
+                            <div class="flex items-center gap-2">
+                                <i class="fa-solid fa-heart-pulse text-rose-400"></i>
+                                <span class="text-xs font-bold uppercase tracking-wider text-slate-300">Autonomous Heartbeat Supervisor Feed</span>
+                            </div>
+                            <span class="text-[11px] font-mono text-slate-500">Every 30s pulse</span>
+                        </div>
+                        <div class="p-3 rounded-xl border font-mono text-xs text-slate-300 h-64 overflow-y-auto scrollbar-thin space-y-1 select-text" style="background-color: var(--bg-input); border-color: var(--border-base);" id="ceo-heartbeat-log-container">
+                            <div class="text-slate-500 italic">Waiting for heartbeat pulses...</div>
+                        </div>
+                    </div>
+
+                    <div class="p-4 rounded-2xl border space-y-3" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                        <div class="flex justify-between items-center">
+                            <span class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                                <i class="fa-solid fa-clock-rotate-left text-amber-400"></i> Executive Audit Trail
+                            </span>
+                            <span class="text-[11px] text-slate-500 font-mono">Recent delegation events</span>
+                        </div>
+                        <div class="p-3 rounded-xl border font-mono text-xs text-slate-300 h-48 overflow-y-auto scrollbar-thin space-y-1.5 select-text" style="background-color: var(--bg-input); border-color: var(--border-base);" id="ceo-audit-log-container">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB 4: CEO OPERATING CHARTER -->
+                <div id="ceo-view-charter" class="space-y-4 hidden">
+                    <div class="flex space-x-2 border-b pb-2" style="border-color: var(--border-base);">
+                        <button onclick="loadCeoCharterPrompt('AGENTS.md')" id="charter-btn-agents" class="px-3 py-1.5 rounded-lg text-xs font-bold border" style="background: var(--bg-input); border-color: var(--border-base); color: var(--highlight-text);">AGENTS.md (Operational Rules)</button>
+                        <button onclick="loadCeoCharterPrompt('SOUL.md')" id="charter-btn-soul" class="px-3 py-1.5 rounded-lg text-xs font-bold border text-slate-400 hover:text-white" style="background: var(--bg-card); border-color: var(--border-base);">SOUL.md (Executive Posture)</button>
+                        <button onclick="loadCeoCharterPrompt('HEARTBEAT.md')" id="charter-btn-heartbeat" class="px-3 py-1.5 rounded-lg text-xs font-bold border text-slate-400 hover:text-white" style="background: var(--bg-card); border-color: var(--border-base);">HEARTBEAT.md (Checklist)</button>
+                    </div>
+                    <div class="p-4 rounded-xl border font-mono text-xs text-slate-300 whitespace-pre-wrap h-96 overflow-y-auto scrollbar-thin select-text" style="background-color: var(--bg-input); border-color: var(--border-base);" id="ceo-charter-text-container">
+                        Loading charter document...
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Modal Footer -->
+            <div class="px-6 py-2.5 border-t flex justify-between items-center text-xs flex-shrink-0" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                <div class="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
+                    <span>👑 Antigravity Executive OS</span>
+                    <span>•</span>
+                    <span class="text-amber-400/80">Autonomous Fleet Delegation</span>
+                </div>
+                <button onclick="closeCeoModal()" class="px-4 py-1.5 rounded-xl border text-xs font-bold transition hover:bg-white/5" style="border-color: var(--border-base); color: var(--text-main);">
+                    Close Suite
+                </button>
+            </div>
+        </div>
+    </div>
 
     </main>
 
@@ -1959,6 +2341,14 @@ HTML_TEMPLATE = """
                 badgeText: "#a5b4fc",
                 defaultRole: "Autonomous Pair Programmer",
                 tag: "Google AGY",
+                recommendedVirt: "LXC Container (or VM)",
+                virtType: "lxc",
+                virtBadge: "LXC SUPPORTED",
+                virtBadgeClass: "text-indigo-400 bg-indigo-500/10 border-indigo-500/30",
+                minCpu: "2 - 4 vCPUs",
+                minRam: "4 - 8 GB RAM",
+                minDisk: "20 GB SSD",
+                virtReason: "Runs lightweight Xvfb + Openbox GUI desktop, Chromium browser, noVNC display server, and Antigravity Skills runner.",
                 description: "Google Antigravity IDE agent with proactive coding, skills runner, and autonomous CLI workflows."
             },
             codex: {
@@ -1972,6 +2362,14 @@ HTML_TEMPLATE = """
                 badgeText: "#6ee7b7",
                 defaultRole: "Code Synthesis & Refactor",
                 tag: "OpenAI Codex",
+                recommendedVirt: "LXC Container (or VM)",
+                virtType: "lxc",
+                virtBadge: "LXC SUPPORTED",
+                virtBadgeClass: "text-emerald-400 bg-emerald-500/10 border-emerald-500/30",
+                minCpu: "2 - 4 vCPUs",
+                minRam: "4 - 8 GB RAM",
+                minDisk: "30 GB SSD",
+                virtReason: "Runs Node.js 20 LTS, pnpm, Python AST analyzers, code linters, and headless autonomous development toolchain.",
                 description: "Code generation specialist for AST refactoring, unit test suites, and autonomous pull requests."
             },
             hermes: {
@@ -1985,6 +2383,14 @@ HTML_TEMPLATE = """
                 badgeText: "#fcd34d",
                 defaultRole: "Reasoning & Function Calling",
                 tag: "Nous Hermes",
+                recommendedVirt: "KVM Virtual Machine (Required)",
+                virtType: "qemu",
+                virtBadge: "⚡ KVM VM REQUIRED",
+                virtBadgeClass: "text-amber-400 bg-amber-500/10 border-amber-500/30",
+                minCpu: "4 - 8 vCPUs (host flags)",
+                minRam: "16 - 32 GB RAM",
+                minDisk: "60 GB SSD",
+                virtReason: "Requires hardware AVX-512 flags, nested Docker runtime without LXC cgroup limits, and optional PCIe GPU passthrough for local LLMs (Ollama/Hermes-3).",
                 description: "Nous Research Hermes framework specializing in deep chain-of-thought, tool use, and agentic workflows."
             },
             openclaw: {
@@ -1998,7 +2404,36 @@ HTML_TEMPLATE = """
                 badgeText: "#fda4af",
                 defaultRole: "Autonomous Web Scraper & Crawler",
                 tag: "Web Crawler",
+                recommendedVirt: "KVM Virtual Machine (Required)",
+                virtType: "qemu",
+                virtBadge: "⚡ KVM VM REQUIRED",
+                virtBadgeClass: "text-rose-400 bg-rose-500/10 border-rose-500/30",
+                minCpu: "4 - 8 vCPUs",
+                minRam: "8 - 16 GB RAM",
+                minDisk: "50 GB SSD",
+                virtReason: "Requires full user namespaces (clone3) and AppArmor/seccomp enforcement for Playwright/Chromium sandboxing, plus isolated network stack for rotating proxies/WireGuard.",
                 description: "Autonomous browser crawler, DOM scraper, site monitor, and automated web task execution bot."
+            },
+            ceo: {
+                id: "ceo",
+                name: "Paperclip CEO",
+                fullName: "Chief Executive Agent",
+                icon: "fa-solid fa-crown",
+                color: "#a855f7",
+                badgeBg: "rgba(168, 85, 247, 0.15)",
+                badgeBorder: "rgba(168, 85, 247, 0.35)",
+                badgeText: "#d8b4fe",
+                defaultRole: "Chief Executive Officer",
+                tag: "Paperclip CEO",
+                recommendedVirt: "LXC Container (or Cockpit Host)",
+                virtType: "lxc",
+                virtBadge: "LXC SUPPORTED",
+                virtBadgeClass: "text-purple-400 bg-purple-500/10 border-purple-500/30",
+                minCpu: "2 vCPUs",
+                minRam: "2 - 4 GB RAM",
+                minDisk: "15 GB SSD",
+                virtReason: "Paperclip executive governance, heartbeat supervisor, strategic work order generation, and cross-agent delegation.",
+                description: "Paperclip CEO governance agent orchestrating cross-agent tasks, delegation, and strategic oversight."
             },
             custom: {
                 id: "custom",
@@ -2010,7 +2445,15 @@ HTML_TEMPLATE = """
                 badgeBorder: "rgba(56, 189, 248, 0.35)",
                 badgeText: "#7dd3fc",
                 defaultRole: "Specialized Node",
-                tag: "Custom VM",
+                tag: "Custom Node",
+                recommendedVirt: "Any VM or Container",
+                virtType: "lxc",
+                virtBadge: "CUSTOM NODE",
+                virtBadgeClass: "text-sky-400 bg-sky-500/10 border-sky-500/30",
+                minCpu: "2+ vCPUs",
+                minRam: "4+ GB RAM",
+                minDisk: "20+ GB SSD",
+                virtReason: "Custom Linux container, external microservice, physical machine, or standalone AI agent runner.",
                 description: "Custom Linux container, external microservice, or standalone AI agent runner."
             }
         };
@@ -2029,8 +2472,33 @@ HTML_TEMPLATE = """
                 badgeText: "#7dd3fc",
                 defaultRole: "Specialized Node",
                 tag: "Custom",
+                recommendedVirt: "VM or LXC",
+                virtType: "lxc",
+                virtBadge: "CUSTOM",
+                virtBadgeClass: "text-slate-400 bg-slate-500/10 border-slate-500/30",
+                minCpu: "2+ vCPUs",
+                minRam: "4+ GB RAM",
+                minDisk: "20+ GB SSD",
+                virtReason: "User configured custom execution environment.",
                 description: "Custom Agent Architecture"
             };
+        }
+
+        function isAgentVm(agent) {
+            if (!agent) return false;
+            if (agent.vm_type === "qemu") return true;
+            if (agent.vm_type === "lxc") return false;
+            return ["hermes", "openclaw"].includes(String(agent.type || "").toLowerCase());
+        }
+
+        function getAgentVirtLabel(agent) {
+            return `${isAgentVm(agent) ? 'VM' : 'CT'} ${agent.vmid}`;
+        }
+
+        function getAgentVirtBadge(agent) {
+            return isAgentVm(agent)
+                ? `<span class="text-[9px] font-mono px-1.5 py-0.5 rounded font-semibold border flex items-center gap-1 text-amber-300 bg-amber-500/10 border-amber-500/30"><i class="fa-solid fa-microchip text-[8px]"></i> VM ${agent.vmid}</span>`
+                : `<span class="text-[9px] font-mono px-1.5 py-0.5 rounded font-semibold border flex items-center gap-1 text-slate-300 bg-slate-800 border-slate-700"><i class="fa-solid fa-cube text-[8px]"></i> CT ${agent.vmid}</span>`;
         }
 
         // 1. Build Sidebar DOM Once
@@ -2057,7 +2525,7 @@ HTML_TEMPLATE = """
                             <span class="text-[9px] px-1.5 py-0.5 rounded font-semibold border flex items-center gap-1" style="background:${eng.badgeBg}; color:${eng.badgeText}; border-color:${eng.badgeBorder};">
                                 <i class="${eng.icon} text-[8px]"></i> ${eng.name}
                             </span>
-                            <span class="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">CT ${agent.vmid}</span>
+                            ${getAgentVirtBadge(agent)}
                         </div>
                     </div>
                     <div class="text-[11px] text-slate-400 truncate">${escapeHtml(agent.role)}</div>
@@ -2186,7 +2654,9 @@ HTML_TEMPLATE = """
                         </div>
                         <div class="text-slate-400 text-[11px] font-normal">${escapeHtml(agent.role)}</div>
                     </td>
-                    <td class="p-3.5 text-slate-300 font-mono">${agent.vmid}</td>
+                    <td class="p-3.5 text-slate-300 font-mono">
+                        <span class="font-bold">${getAgentVirtLabel(agent)}</span>
+                    </td>
                     <td class="p-3.5 text-slate-300 font-mono">${agent.ip}</td>
                     <td class="p-3.5" id="table-power-${agent.id}">
                         <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-600/10 text-slate-400 border border-slate-600/20">
@@ -2196,7 +2666,7 @@ HTML_TEMPLATE = """
                     <td class="p-3.5 text-slate-300 font-mono" id="table-metrics-${agent.id}">-- | --</td>
                     <td class="p-3.5" id="table-auth-${agent.id}">
                         <span class="text-[10px] px-2 py-0.5 rounded-full font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                            ΓÜá∩╕Å Needs Auth
+                            <i class="fa-solid fa-triangle-exclamation mr-1"></i> Needs Auth
                         </span>
                     </td>
                     <td class="p-3.5 text-right space-x-2" onclick="event.stopPropagation()">
@@ -3537,20 +4007,74 @@ Describe the main objective of this capability.
             }).join("");
 
             const preview = document.getElementById("selected-engine-badge-preview");
+            const eng = getAgentEngine(selectedAddEngine);
             if (preview) {
-                const eng = getAgentEngine(selectedAddEngine);
                 preview.innerHTML = `Selected: <span class="font-bold text-amber-400">${eng.name}</span> (${eng.defaultRole})`;
+            }
+
+            const specsCard = document.getElementById("engine-specs-card");
+            if (specsCard) {
+                specsCard.innerHTML = `
+                    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2.5 border-b" style="border-color: var(--border-base);">
+                        <div class="flex items-center gap-2">
+                            <div class="w-7 h-7 rounded-lg flex items-center justify-center text-xs flex-shrink-0" style="background-color: ${eng.badgeBg}; color: ${eng.color}; border: 1px solid ${eng.badgeBorder};">
+                                <i class="${eng.icon}"></i>
+                            </div>
+                            <div>
+                                <span class="text-xs font-bold text-white">${eng.fullName}</span>
+                                <span class="text-[10px] text-slate-400 ml-1 font-mono">(${eng.tag})</span>
+                            </div>
+                        </div>
+                        <span class="text-[10px] font-mono px-2.5 py-1 rounded-full font-bold border self-start sm:self-auto ${eng.virtBadgeClass}">
+                            ${eng.virtBadge}
+                        </span>
+                    </div>
+
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 my-2.5">
+                        <div class="p-2 rounded-lg border flex flex-col" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <span class="text-[9px] uppercase font-bold text-slate-400">Environment</span>
+                            <span class="text-xs font-bold text-white mt-0.5">${eng.recommendedVirt}</span>
+                        </div>
+                        <div class="p-2 rounded-lg border flex flex-col" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <span class="text-[9px] uppercase font-bold text-slate-400">CPU Compute</span>
+                            <span class="text-xs font-bold text-amber-300 mt-0.5">${eng.minCpu}</span>
+                        </div>
+                        <div class="p-2 rounded-lg border flex flex-col" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <span class="text-[9px] uppercase font-bold text-slate-400">RAM Allocation</span>
+                            <span class="text-xs font-bold text-emerald-300 mt-0.5">${eng.minRam}</span>
+                        </div>
+                        <div class="p-2 rounded-lg border flex flex-col" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <span class="text-[9px] uppercase font-bold text-slate-400">Storage Required</span>
+                            <span class="text-xs font-bold text-sky-300 mt-0.5">${eng.minDisk}</span>
+                        </div>
+                    </div>
+
+                    <div class="text-[11px] text-slate-300 flex items-start gap-2 pt-2 border-t" style="border-color: var(--border-base);">
+                        <i class="fa-solid fa-circle-info text-slate-400 mt-0.5 flex-shrink-0"></i>
+                        <span><strong class="text-white">Architecture Rationale:</strong> ${eng.virtReason}</span>
+                    </div>
+                `;
+            }
+
+            const host = window.location.host || "192.168.178.168:3000";
+            const pveInput = document.getElementById("pve-provision-cmd");
+            if (pveInput) {
+                pveInput.value = `curl -sSL http://${host}/packages/scripts/pve_provision_agent.sh | bash -s -- --engine ${selectedAddEngine}`;
             }
 
             const cmdInput = document.getElementById("dynamic-install-cmd");
             if (cmdInput) {
-                cmdInput.value = `curl -sSL http://192.168.178.168:3000/install.sh | bash -s -- --engine ${selectedAddEngine}`;
+                cmdInput.value = `curl -sSL http://${host}/install.sh | bash -s -- --engine ${selectedAddEngine}`;
+            }
+
+            const virtSelect = document.getElementById("new-agent-virt-type");
+            if (virtSelect) {
+                virtSelect.value = eng.virtType || "lxc";
             }
 
             const nameInput = document.getElementById("new-agent-name");
             const roleInput = document.getElementById("new-agent-role");
             if (nameInput && roleInput) {
-                const eng = getAgentEngine(selectedAddEngine);
                 nameInput.placeholder = `e.g. ${eng.name}-Node`;
                 roleInput.placeholder = `e.g. ${eng.defaultRole}`;
             }
@@ -3719,6 +4243,8 @@ Describe the main objective of this capability.
 
             if (!name || !ip) { _registerLock = false; return alert("Please provide Agent Name and IP address"); }
 
+            const virtType = (document.getElementById("new-agent-virt-type")?.value) || (['hermes', 'openclaw'].includes(selectedAddEngine) ? 'qemu' : 'lxc');
+
             try {
                 const res = await fetch("/api/agents/add", {
                     method: "POST",
@@ -3727,7 +4253,8 @@ Describe the main objective of this capability.
                         name: name,
                         role: role,
                         ip: ip,
-                        type: selectedAddEngine
+                        type: selectedAddEngine,
+                        vm_type: virtType
                     })
                 });
                 const data = await res.json();
@@ -4002,7 +4529,7 @@ Describe the main objective of this capability.
                 const data = await res.json();
                 if (data.success) {
                     await fetchWorkspaces();
-                    alert(`Git repository '${data.workspace.name}' successfully pulled and updated!${data.redeploy ? '\nAuto-redeployed to mounted agents.' : ''}`);
+                    alert(`Git repository '${data.workspace.name}' successfully pulled and updated!${data.redeploy ? '\\nAuto-redeployed to mounted agents.' : ''}`);
                 } else {
                     alert(data.error || "Git pull failed");
                 }
@@ -4562,7 +5089,7 @@ Describe the main objective of this capability.
                 if (res.ok) {
                     if (metricsEl) metricsEl.innerText = `• ${data.lines || 0} lines • ${Math.round((data.size || 0) / 1024)} KB`;
                     
-                    const lines = (data.content || "").split("\n");
+                    const lines = (data.content || "").split(String.fromCharCode(10));
                     const linesHtml = lines.map((line, idx) => `
                         <div class="table-row hover:bg-white/5">
                             <span class="table-cell text-right pr-4 select-none text-slate-600 text-[11px]">${idx + 1}</span>
@@ -4604,11 +5131,485 @@ Describe the main objective of this capability.
             downloadWorkspaceArchive(currentExplorerWsId);
         }
 
+        // ============================================================
+        // CEO EXECUTIVE SUITE CLIENT CONTROLLER (PAPERCLIP PATTERN)
+        // ============================================================
+        let ceoPollTimer = null;
+        let currentCeoTab = "kanban";
+        let ceoRoleList = [];
+
+        function openCeoModal() {
+            const modal = document.getElementById("ceo-modal");
+            if (!modal) return;
+            modal.classList.remove("hidden");
+            
+            // Populate workspace dropdown
+            populateCeoWorkspaceSelect();
+            refreshCeoData();
+            switchCeoTab(currentCeoTab);
+
+            if (ceoPollTimer) clearInterval(ceoPollTimer);
+            ceoPollTimer = setInterval(refreshCeoData, 4000);
+        }
+
+        function closeCeoModal() {
+            const modal = document.getElementById("ceo-modal");
+            if (modal) modal.classList.add("hidden");
+            if (ceoPollTimer) {
+                clearInterval(ceoPollTimer);
+                ceoPollTimer = null;
+            }
+        }
+
+        function populateCeoWorkspaceSelect() {
+            const select = document.getElementById("ceo-ws-select");
+            if (!select) return;
+            fetch("/api/workspaces")
+                .then(r => r.json())
+                .then(res => {
+                    const wsList = res.workspaces || [];
+                    const currentVal = select.value;
+                    select.innerHTML = '<option value="">Target Workspace: None</option>' +
+                        wsList.map(w => `<option value="${w.id}">${w.name} (${w.primary_language || 'Codebase'})</option>`).join("");
+                    if (currentVal) select.value = currentVal;
+                })
+                .catch(err => console.error("Failed to load workspaces for CEO select", err));
+        }
+
+        function switchCeoTab(tabId) {
+            currentCeoTab = tabId;
+            const tabs = ["kanban", "org", "heartbeat", "charter"];
+            tabs.forEach(t => {
+                const view = document.getElementById(`ceo-view-${t}`);
+                const btn = document.getElementById(`ceo-tab-btn-${t}`);
+                if (view) {
+                    if (t === tabId) view.classList.remove("hidden");
+                    else view.classList.add("hidden");
+                }
+                if (btn) {
+                    if (t === tabId) {
+                        btn.style.borderColor = "var(--accent-primary)";
+                        btn.style.color = "var(--highlight-text)";
+                    } else {
+                        btn.style.borderColor = "transparent";
+                        btn.style.color = "#94a3b8";
+                    }
+                }
+            });
+
+            if (tabId === "charter") {
+                loadCeoCharterPrompt("AGENTS.md");
+            }
+        }
+
+        function refreshCeoData() {
+            // 1. Fetch Executive Status & Metrics
+            fetch("/api/ceo/status")
+                .then(r => r.json())
+                .then(data => {
+                    if (!data) return;
+                    
+                    // Update pulse badge and summary
+                    const pulseCounter = document.getElementById("ceo-pulse-counter");
+                    if (pulseCounter && data.heartbeat) {
+                        pulseCounter.innerText = data.heartbeat.count || 1;
+                    }
+                    const summaryBanner = document.getElementById("ceo-summary-banner");
+                    if (summaryBanner) {
+                        summaryBanner.innerText = data.executive_summary || "Standing by.";
+                    }
+                    const lastPulseTime = document.getElementById("ceo-last-pulse-time");
+                    if (lastPulseTime && data.heartbeat && data.heartbeat.timestamp) {
+                        const elapsed = Math.max(0, Math.floor(Date.now() / 1000 - data.heartbeat.timestamp));
+                        lastPulseTime.innerText = `Last pulse ${elapsed}s ago`;
+                    }
+
+                    // Update metrics
+                    if (data.metrics) {
+                        const m = data.metrics;
+                        const vEl = document.getElementById("metric-velocity");
+                        if (vEl) vEl.innerText = `${m.velocity_pct || 100}%`;
+                        const ipEl = document.getElementById("metric-in-progress");
+                        if (ipEl) ipEl.innerText = m.in_progress || 0;
+                        const bEl = document.getElementById("metric-blocked");
+                        if (bEl) bEl.innerText = m.blocked || 0;
+                        const tEl = document.getElementById("badge-total-tasks");
+                        if (tEl) tEl.innerText = m.total_tasks || 0;
+                    }
+
+                    // Store roles
+                    if (data.roles) ceoRoleList = data.roles;
+
+                    // Render Heartbeat & Audit logs
+                    renderHeartbeatLogs(data.heartbeat?.log || [], data.audit_log || []);
+                })
+                .catch(err => console.error("Failed fetching CEO status", err));
+
+            // 2. Fetch Work Orders for Kanban
+            fetch("/api/ceo/tasks")
+                .then(r => r.json())
+                .then(res => {
+                    renderKanbanCards(res.tasks || []);
+                })
+                .catch(err => console.error("Failed fetching CEO tasks", err));
+
+            // 3. Fetch Org Chart & Fleet Roles
+            fetch("/api/ceo/org")
+                .then(r => r.json())
+                .then(res => {
+                    renderFleetRolesTable(res.agents || [], res.roles || []);
+                })
+                .catch(err => console.error("Failed fetching CEO org", err));
+        }
+
+        function submitBoardDirective() {
+            const input = document.getElementById("ceo-directive-input");
+            const wsSelect = document.getElementById("ceo-ws-select");
+            const prioSelect = document.getElementById("ceo-priority-select");
+            const btn = document.getElementById("btn-submit-directive");
+
+            const text = (input ? input.value : "").trim();
+            if (!text) {
+                alert("Please enter a directive for the CEO to decompose.");
+                return;
+            }
+
+            if (btn) btn.disabled = true;
+            fetch("/api/ceo/order", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    directive: text,
+                    workspace_id: wsSelect ? wsSelect.value : null,
+                    priority: prioSelect ? prioSelect.value : "high"
+                })
+            })
+            .then(r => r.json())
+            .then(res => {
+                if (btn) btn.disabled = false;
+                if (res.success) {
+                    if (input) input.value = "";
+                    refreshCeoData();
+                    triggerCeoPulse();
+                } else {
+                    alert("Directive Error: " + (res.error || "Failed to submit"));
+                }
+            })
+            .catch(err => {
+                if (btn) btn.disabled = false;
+                alert("Request failed: " + err);
+            });
+        }
+
+        function triggerCeoPulse() {
+            const btn = document.getElementById("btn-ceo-pulse");
+            if (btn) btn.classList.add("opacity-50");
+            fetch("/api/ceo/heartbeat", { method: "POST" })
+                .then(r => r.json())
+                .then(() => {
+                    if (btn) btn.classList.remove("opacity-50");
+                    refreshCeoData();
+                })
+                .catch(err => {
+                    if (btn) btn.classList.remove("opacity-50");
+                    console.error("Pulse trigger error", err);
+                });
+        }
+
+        function renderKanbanCards(tasks) {
+            const cols = {
+                todo: document.getElementById("kanban-col-todo"),
+                in_progress: document.getElementById("kanban-col-in_progress"),
+                in_review: document.getElementById("kanban-col-in_review"),
+                blocked: document.getElementById("kanban-col-blocked"),
+                done: document.getElementById("kanban-col-done")
+            };
+
+            const counts = { todo: 0, in_progress: 0, in_review: 0, blocked: 0, done: 0 };
+
+            // Clear columns
+            Object.values(cols).forEach(c => { if (c) c.innerHTML = ""; });
+
+            tasks.forEach(t => {
+                const status = t.status || "todo";
+                counts[status] = (counts[status] || 0) + 1;
+                const col = cols[status];
+                if (!col) return;
+
+                const roleBadgeColor = getRoleBadgeColor(t.role);
+                const roleIcon = getRoleIcon(t.role);
+
+                const card = document.createElement("div");
+                card.className = "p-3 rounded-xl border space-y-2 text-xs transition hover:border-slate-500 shadow-sm relative overflow-hidden";
+                card.style.backgroundColor = "var(--bg-input)";
+                card.style.borderColor = "var(--border-base)";
+
+                let blockedInfo = "";
+                if (t.blocked_by && t.blocked_by.length > 0 && status !== "done") {
+                    blockedInfo = `<div class="text-[10px] font-mono text-rose-400/90 flex items-center gap-1">
+                        <i class="fa-solid fa-lock text-[9px]"></i> Blocked by: ${t.blocked_by.join(", ")}
+                    </div>`;
+                }
+
+                let criteriaList = "";
+                if (t.acceptance_criteria && t.acceptance_criteria.length > 0) {
+                    criteriaList = `<div class="space-y-0.5 pt-1 border-t border-white/5">
+                        ${t.acceptance_criteria.slice(0, 2).map(c => `<div class="text-[10px] text-slate-400 flex items-start gap-1">
+                            <span class="text-slate-500">•</span> <span class="truncate">${c}</span>
+                        </div>`).join("")}
+                    </div>`;
+                }
+
+                let actions = "";
+                if (status === "todo") {
+                    actions = `<button onclick="taskAction('${t.id}', 'dispatch')" class="px-2 py-1 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30 hover:bg-blue-500/30 font-bold text-[10px] flex items-center gap-1">
+                        <i class="fa-solid fa-paper-plane text-[9px]"></i> Dispatch
+                    </button>`;
+                } else if (status === "in_progress") {
+                    actions = `<button onclick="taskAction('${t.id}', 'approve')" class="px-2 py-1 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30 font-bold text-[10px] flex items-center gap-1">
+                        <i class="fa-solid fa-check text-[9px]"></i> Mark Done
+                    </button>`;
+                } else if (status === "in_review") {
+                    actions = `<div class="flex gap-1">
+                        <button onclick="taskAction('${t.id}', 'approve')" class="px-2 py-1 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30 font-bold text-[10px]">Approve</button>
+                        <button onclick="taskAction('${t.id}', 'reject')" class="px-2 py-1 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 font-bold text-[10px]">Revision</button>
+                    </div>`;
+                } else if (status === "blocked") {
+                    actions = `<button onclick="taskAction('${t.id}', 'dispatch')" class="px-2 py-1 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 hover:bg-rose-500/30 font-bold text-[10px] flex items-center gap-1">
+                        <i class="fa-solid fa-rotate text-[9px]"></i> Retry Dispatch
+                    </button>`;
+                }
+
+                card.innerHTML = `
+                    <div class="flex items-center justify-between">
+                        <span class="text-[10px] font-mono font-bold text-slate-400">${t.id}</span>
+                        <span class="px-2 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider" style="${roleBadgeColor}">
+                            ${roleIcon} ${t.role}
+                        </span>
+                    </div>
+                    <div class="font-semibold text-slate-100 text-xs leading-snug line-clamp-2">${t.title}</div>
+                    <div class="flex items-center justify-between text-[11px] text-slate-400">
+                        <span class="flex items-center gap-1"><i class="fa-solid fa-robot text-slate-500"></i> ${t.assigned_agent_id || 'Unassigned'}</span>
+                        <span class="text-[10px] font-mono capitalize px-1.5 py-0.2 rounded bg-white/5">${t.priority}</span>
+                    </div>
+                    ${blockedInfo}
+                    ${criteriaList}
+                    ${actions ? `<div class="pt-1.5 flex justify-end border-t border-white/5">${actions}</div>` : ''}
+                `;
+                col.appendChild(card);
+            });
+
+            // Update column badges
+            Object.keys(counts).forEach(s => {
+                const badge = document.getElementById(`col-count-${s}`);
+                if (badge) badge.innerText = counts[s];
+            });
+        }
+
+        function getRoleIcon(role) {
+            const map = { ceo: "👑", cto: "🏛️", frontend: "🎨", backend: "⚡", codex: "💻", hermes: "🧠", openclaw: "🌐", qa: "🛡️" };
+            return map[role] || "🤖";
+        }
+
+        function getRoleBadgeColor(role) {
+            const map = {
+                ceo: "background: rgba(245,158,11,0.2); color: #fbbf24; border: 1px solid rgba(245,158,11,0.3);",
+                cto: "background: rgba(59,130,246,0.2); color: #60a5fa; border: 1px solid rgba(59,130,246,0.3);",
+                frontend: "background: rgba(236,72,153,0.2); color: #f472b6; border: 1px solid rgba(236,72,153,0.3);",
+                backend: "background: rgba(16,185,129,0.2); color: #34d399; border: 1px solid rgba(16,185,129,0.3);",
+                codex: "background: rgba(99,102,241,0.2); color: #818cf8; border: 1px solid rgba(99,102,241,0.3);",
+                hermes: "background: rgba(168,85,247,0.2); color: #c084fc; border: 1px solid rgba(168,85,247,0.3);",
+                openclaw: "background: rgba(14,165,233,0.2); color: #38bdf8; border: 1px solid rgba(14,165,233,0.3);",
+                qa: "background: rgba(244,63,94,0.2); color: #fb7185; border: 1px solid rgba(244,63,94,0.3);"
+            };
+            return map[role] || "background: rgba(255,255,255,0.1); color: #cbd5e1;";
+        }
+
+        function taskAction(orderId, action) {
+            fetch(`/api/ceo/tasks/${orderId}/action`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: action })
+            })
+            .then(r => r.json())
+            .then(res => {
+                if (res.success) {
+                    refreshCeoData();
+                } else {
+                    alert("Task action failed: " + (res.error || "Unknown"));
+                }
+            })
+            .catch(err => alert("Request error: " + err));
+        }
+
+        function renderFleetRolesTable(agentList, roleList) {
+            const tbody = document.getElementById("ceo-fleet-roles-tbody");
+            if (!tbody) return;
+
+            const roles = roleList.length > 0 ? roleList : ceoRoleList;
+            tbody.innerHTML = agentList.map(a => {
+                const currentRole = a.role || "Frontend Specialist";
+                const isOnline = a.status && a.status !== "offline";
+                const statusColor = isOnline ? "text-emerald-400" : "text-slate-500";
+                const statusDot = isOnline ? "bg-emerald-400" : "bg-slate-500";
+
+                const roleOptions = roles.map(r => {
+                    const isSelected = (r.id.toLowerCase() === currentRole.toLowerCase() ||
+                                        r.name.toLowerCase() === currentRole.toLowerCase() ||
+                                        currentRole.toLowerCase().includes(r.id.toLowerCase()));
+                    return `<option value="${r.id}" ${isSelected ? 'selected' : ''}>${r.icon} ${r.name} (${r.title})</option>`;
+                }).join("");
+
+                return `
+                    <tr class="hover:bg-white/5 transition">
+                        <td class="py-3 px-3 font-semibold text-white flex items-center gap-2">
+                            <span>${a.name}</span>
+                            <span class="text-[10px] text-slate-500 font-mono">(${a.id})</span>
+                        </td>
+                        <td class="py-3 px-3 font-mono text-slate-400">CT ${a.vmid}</td>
+                        <td class="py-3 px-3 font-mono text-slate-400">${a.ip}:${a.port} <span class="px-1.5 py-0.2 rounded bg-white/5 text-[10px] uppercase">${a.type || 'antigravity'}</span></td>
+                        <td class="py-3 px-3">
+                            <select onchange="updateAgentFleetRole('${a.id}', this.value)" class="px-2.5 py-1.5 rounded-lg border text-xs text-slate-200 focus:outline-none" style="background-color: var(--bg-card); border-color: var(--border-base);">
+                                ${roleOptions}
+                            </select>
+                        </td>
+                        <td class="py-3 px-3">
+                            <span class="flex items-center gap-1.5 ${statusColor} font-mono font-medium">
+                                <span class="w-2 h-2 rounded-full ${statusDot}"></span>
+                                ${a.status || 'offline'}
+                            </span>
+                        </td>
+                        <td class="py-3 px-3">
+                            <button onclick="dispatchDirectTaskToAgent('${a.id}')" class="px-2.5 py-1 rounded-lg bg-blue-500/20 text-blue-300 border border-blue-500/30 hover:bg-blue-500/30 font-semibold text-[11px] flex items-center gap-1">
+                                <i class="fa-solid fa-paper-plane text-[10px]"></i> Dispatch
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            }).join("");
+        }
+
+        function updateAgentFleetRole(agentId, roleId) {
+            fetch("/api/ceo/role", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ agent_id: agentId, role: roleId })
+            })
+            .then(r => r.json())
+            .then(res => {
+                if (res.success) {
+                    refreshCeoData();
+                } else {
+                    alert("Failed to update role: " + res.error);
+                }
+            })
+            .catch(err => alert("Error updating role: " + err));
+        }
+
+        function dispatchDirectTaskToAgent(agentId) {
+            closeCeoModal();
+            selectView(agentId);
+        }
+
+        function renderHeartbeatLogs(pulseLogs, auditEvents) {
+            const hbContainer = document.getElementById("ceo-heartbeat-log-container");
+            if (hbContainer && pulseLogs && pulseLogs.length > 0) {
+                hbContainer.innerHTML = pulseLogs.map(l => {
+                    let color = "text-slate-300";
+                    if (l.includes("[DISPATCH_OK]") || l.includes("[VERIFIED]")) color = "text-emerald-400";
+                    else if (l.includes("[ESCALATION]") || l.includes("[DISPATCH_WARN]")) color = "text-rose-400";
+                    else if (l.includes("[REVIEW_GATE]")) color = "text-purple-400";
+                    else if (l.includes("[FLEET_CHECK]")) color = "text-blue-400";
+                    return `<div class="${color}">${l}</div>`;
+                }).join("");
+                hbContainer.scrollTop = hbContainer.scrollHeight;
+            }
+
+            const auditContainer = document.getElementById("ceo-audit-log-container");
+            if (auditContainer && auditEvents && auditEvents.length > 0) {
+                auditContainer.innerHTML = auditEvents.slice(-25).reverse().map(e => {
+                    return `<div class="flex items-start gap-2 border-b border-white/5 pb-1">
+                        <span class="text-slate-500 text-[10px] flex-shrink-0">${e.time_iso?.split(' ')[1] || ''}</span>
+                        <span class="px-1.5 py-0.2 rounded text-[9px] uppercase font-bold bg-white/5 text-amber-300 flex-shrink-0">${e.type}</span>
+                        <span class="text-slate-300 flex-1 truncate">${e.message}</span>
+                    </div>`;
+                }).join("");
+            }
+        }
+
+        function loadCeoCharterPrompt(promptName) {
+            const container = document.getElementById("ceo-charter-text-container");
+            const btns = {
+                "AGENTS.md": document.getElementById("charter-btn-agents"),
+                "SOUL.md": document.getElementById("charter-btn-soul"),
+                "HEARTBEAT.md": document.getElementById("charter-btn-heartbeat")
+            };
+
+            Object.entries(btns).forEach(([k, b]) => {
+                if (!b) return;
+                if (k === promptName) {
+                    b.style.background = "var(--bg-input)";
+                    b.style.color = "var(--highlight-text)";
+                } else {
+                    b.style.background = "var(--bg-card)";
+                    b.style.color = "#94a3b8";
+                }
+            });
+
+            if (container) container.innerText = "Loading " + promptName + "...";
+
+            fetch(`/api/ceo/prompts/${promptName}`)
+                .then(r => r.json())
+                .then(res => {
+                    if (container) container.innerText = res.content || "Empty content.";
+                })
+                .catch(err => {
+                    if (container) container.innerText = "Failed loading prompt: " + err;
+                });
+        }
+
         window.onload = init;
     </script>
 </body>
 </html>
 """
+
+def get_agent_vm_type(agent):
+    if not agent:
+        return "lxc"
+    return agent.get("vm_type") or ("qemu" if agent.get("type") in ["hermes", "openclaw"] else "lxc")
+
+def pve_api_request(method, agent, path_suffix, **kwargs):
+    """Executes a Proxmox API call, auto-resolving between QEMU VM and LXC endpoints."""
+    vm_type = get_agent_vm_type(agent)
+    vmid = agent.get("vmid") if isinstance(agent, dict) else agent
+    if not vmid:
+        return None
+    
+    headers = {"Authorization": PROXMOX_TOKEN}
+    if "headers" in kwargs:
+        headers.update(kwargs.pop("headers"))
+    
+    fn = getattr(requests, method.lower())
+    clean_suffix = f"/{path_suffix.strip('/')}" if path_suffix.strip('/') else ""
+    primary_url = f"{PROXMOX_API}/nodes/pve/{vm_type}/{vmid}{clean_suffix}"
+    
+    try:
+        r = fn(primary_url, headers=headers, verify=False, **kwargs)
+        if r.status_code == 200:
+            return r
+        if r.status_code in [400, 404, 500]:
+            # Auto-fallback between QEMU VM and LXC container
+            alt_type = "lxc" if vm_type == "qemu" else "qemu"
+            alt_url = f"{PROXMOX_API}/nodes/pve/{alt_type}/{vmid}{clean_suffix}"
+            r_alt = fn(alt_url, headers=headers, verify=False, **kwargs)
+            if r_alt.status_code == 200:
+                if isinstance(agent, dict):
+                    agent["vm_type"] = alt_type
+                return r_alt
+        return r
+    except Exception:
+        return None
 
 @app.route("/")
 def index():
@@ -4621,13 +5622,8 @@ def get_all_status():
         power = "unknown"
         metrics = {}
         try:
-            r = requests.get(
-                f"{PROXMOX_API}/nodes/pve/lxc/{agent['vmid']}/status/current",
-                headers={"Authorization": PROXMOX_TOKEN},
-                verify=False,
-                timeout=1.5
-            )
-            if r.status_code == 200:
+            r = pve_api_request("get", agent, "status/current", timeout=1.5)
+            if r and r.status_code == 200:
                 d = r.json().get("data", {})
                 power = d.get("status", "stopped")
                 metrics = {
@@ -4655,7 +5651,8 @@ def get_all_status():
             "power": power,
             "status": agent_status,
             "authenticated": auth_status,
-            "metrics": metrics
+            "metrics": metrics,
+            "vm_type": agent.get("vm_type") or get_agent_vm_type(agent)
         }
     return jsonify(results)
 
@@ -4669,13 +5666,12 @@ def power_control():
         return jsonify({"error": "Invalid agent"}), 400
     
     try:
-        r = requests.post(
-            f"{PROXMOX_API}/nodes/pve/lxc/{agent['vmid']}/status/{action}",
-            headers={"Authorization": PROXMOX_TOKEN},
-            verify=False,
-            timeout=5
-        )
-        return jsonify({"success": True, "message": f"{agent['name']} {action} initiated"})
+        r = pve_api_request("post", agent, f"status/{action}", timeout=5)
+        if r and r.status_code < 400:
+            target_type = (agent.get("vm_type") or get_agent_vm_type(agent)).upper()
+            return jsonify({"success": True, "message": f"{agent['name']} ({target_type}) {action} initiated"})
+        err_msg = r.text if r else "Proxmox API communication failed"
+        return jsonify({"error": f"Failed to {action}: {err_msg}"}), (r.status_code if r else 500)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -4703,15 +5699,26 @@ def grab_agent_screenshot():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/dispatch", methods=["POST"])
-def dispatch_task():
-    data = request.get_json(force=True, silent=True) or {}
-    target = data.get("target", "agent-1")
-    prompt = data.get("prompt", "")
-    images = data.get("images", [])
-    ws_id = data.get("workspace_id")
-    auto_deploy = bool(data.get("auto_deploy", True))
-    
+def get_single_agent_status(agent_id):
+    agent = next((a for a in AGENTS if a["id"] == agent_id), None)
+    if not agent:
+        return {"running": False, "busy": False, "authenticated": False}
+    try:
+        r_agent = requests.get(f"http://{agent['ip']}:{agent['port']}/status", timeout=1.2)
+        if r_agent.status_code == 200:
+            d = r_agent.json()
+            return {
+                "running": True,
+                "busy": d.get("status") == "busy",
+                "status": d.get("status", "idle"),
+                "authenticated": d.get("authenticated", False)
+            }
+    except Exception:
+        pass
+    return {"running": False, "busy": False, "status": "offline", "authenticated": False}
+
+def dispatch_task_internal(target="agent-1", prompt="", images=None, ws_id=None, auto_deploy=True):
+    images = images or []
     targets = [a for a in AGENTS if (target == "broadcast" or a["id"] == target)]
     
     # Auto-deploy workspace to target agents if specified and not yet synced
@@ -4747,7 +5754,19 @@ def dispatch_task():
         except Exception as e:
             responses.append({a["id"]: {"error": str(e)}})
             
-    return jsonify({"success": True, "message": "Task dispatched", "responses": responses, "workspace_id": ws_id})
+    return {"success": True, "message": "Task dispatched", "responses": responses, "workspace_id": ws_id}
+
+@app.route("/api/dispatch", methods=["POST"])
+def dispatch_task():
+    data = request.get_json(force=True, silent=True) or {}
+    res = dispatch_task_internal(
+        target=data.get("target", "agent-1"),
+        prompt=data.get("prompt", ""),
+        images=data.get("images", []),
+        ws_id=data.get("workspace_id"),
+        auto_deploy=bool(data.get("auto_deploy", True))
+    )
+    return jsonify(res)
 
 @app.route("/api/auth", methods=["POST"])
 def save_auth():
@@ -5023,25 +6042,81 @@ def remove_skill():
 # ------------------------------------------------------------------
 # AGENT INSTALLER & PACKAGE REPOSITORY
 # ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# AGENT INSTALLER & PACKAGE REPOSITORY
+# ------------------------------------------------------------------
 @app.route("/install.sh", methods=["GET"])
 def get_installer_script():
-    installer_path = "/usr/local/share/cockpit/install_antigravity_agent.sh"
-    if not os.path.exists(installer_path):
-        installer_path = os.path.join(os.path.dirname(SCRIPT_DIR), "agent", "install_antigravity_agent.sh")
-    if not os.path.exists(installer_path):
+    installer_candidates = [
+        "/usr/local/share/cockpit/install.sh",
+        os.path.join(os.path.dirname(SCRIPT_DIR), "agent", "install.sh"),
+        os.path.join(SCRIPT_DIR, "agent", "install.sh"),
+        "/usr/local/share/cockpit/install_antigravity_agent.sh",
+        os.path.join(os.path.dirname(SCRIPT_DIR), "agent", "install_antigravity_agent.sh")
+    ]
+    installer_path = None
+    for c in installer_candidates:
+        if os.path.exists(c):
+            installer_path = c
+            break
+    if not installer_path:
         return "#!/bin/bash\necho 'Error: installer script not found on Cockpit server.'\nexit 1\n", 404, {"Content-Type": "text/plain; charset=utf-8"}
+    
     with open(installer_path, "r", encoding="utf-8") as f:
         script = f.read()
     host_header = request.host
-    script = script.replace('COCKPIT_HOST="${COCKPIT_HOST:-192.168.178.168:3000}"', f'COCKPIT_HOST="${{COCKPIT_HOST:-{host_header}}}"')
+    script = script.replace('COCKPIT_HOST="${COCKPIT_HOST:-http://192.168.178.168:3000}"', f'COCKPIT_HOST="${{COCKPIT_HOST:-http://{host_header}}}"')
+    script = script.replace('COCKPIT_HOST="${COCKPIT_HOST:-192.168.178.168:3000}"', f'COCKPIT_HOST="${{COCKPIT_HOST:-http://{host_header}}}"')
     return script, 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+@app.route("/packages/installers/<filename>", methods=["GET"])
+def get_installer_file(filename):
+    safe_filename = os.path.basename(filename)
+    candidates = [
+        os.path.join("/usr/local/share/cockpit/installers", safe_filename),
+        os.path.join(os.path.dirname(SCRIPT_DIR), "agent", "installers", safe_filename),
+        os.path.join(SCRIPT_DIR, "agent", "installers", safe_filename)
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            with open(c, "r", encoding="utf-8") as f:
+                script = f.read()
+            host_header = request.host
+            script = script.replace('COCKPIT_HOST="${COCKPIT_HOST:-http://192.168.178.168:3000}"', f'COCKPIT_HOST="${{COCKPIT_HOST:-http://{host_header}}}"')
+            return script, 200, {"Content-Type": "text/plain; charset=utf-8"}
+    return f"Installer {safe_filename} not found", 404
+
+@app.route("/packages/scripts/<filename>", methods=["GET"])
+def get_script_file(filename):
+    safe_filename = os.path.basename(filename)
+    candidates = [
+        os.path.join("/usr/local/share/cockpit/scripts", safe_filename),
+        os.path.join(os.path.dirname(SCRIPT_DIR), "scripts", safe_filename),
+        os.path.join(SCRIPT_DIR, "scripts", safe_filename)
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            with open(c, "r", encoding="utf-8") as f:
+                script = f.read()
+            host_header = request.host
+            script = script.replace('COCKPIT_HOST="${COCKPIT_HOST:-http://192.168.178.168:3000}"', f'COCKPIT_HOST="${{COCKPIT_HOST:-http://{host_header}}}"')
+            return script, 200, {"Content-Type": "text/plain; charset=utf-8"}
+    return f"Script {safe_filename} not found", 404
 
 @app.route("/packages/<filename>", methods=["GET"])
 def get_package_file(filename):
+    if filename.startswith("install_") and filename.endswith(".sh"):
+        return get_installer_file(filename)
+    if filename == "common.sh":
+        return get_installer_file("common.sh")
+    if filename.endswith(".sh"):
+        return get_script_file(filename)
+
     if filename == "agent_bridge.py":
         agent_bridge_candidates = [
             "/usr/local/bin/agent_bridge.py",
-            os.path.join(os.path.dirname(SCRIPT_DIR), "agent", "agent_bridge.py")
+            os.path.join(os.path.dirname(SCRIPT_DIR), "agent", "agent_bridge.py"),
+            os.path.join(SCRIPT_DIR, "agent", "agent_bridge.py")
         ]
         for c in agent_bridge_candidates:
             if os.path.exists(c):
@@ -5075,6 +6150,8 @@ def rename_agent_route():
     new_name = (data.get("name") or "").strip()
     new_role = (data.get("role") or "").strip()
     new_type = (data.get("type") or data.get("engine") or "").strip().lower()
+    new_virt = (data.get("vm_type") or "").strip().lower()
+    
     agent = next((a for a in AGENTS if a["id"] == agent_id), None)
     if not agent:
         return jsonify({"error": "Agent not found"}), 404
@@ -5084,22 +6161,21 @@ def rename_agent_route():
         agent["role"] = new_role
     if new_type:
         agent["type"] = new_type
+        if not new_virt and "vm_type" not in agent:
+            agent["vm_type"] = "qemu" if new_type in ["hermes", "openclaw"] else "lxc"
+    if new_virt in ["qemu", "lxc"]:
+        agent["vm_type"] = new_virt
+        
     save_agents_config()
     
-    # Optionally update Proxmox LXC description
+    # Optionally update Proxmox VM / LXC description
     try:
         eng_label = agent.get("type", "antigravity").title()
-        requests.put(
-            f"{PROXMOX_API}/nodes/pve/lxc/{agent['vmid']}/config",
-            headers={"Authorization": PROXMOX_TOKEN},
-            json={"description": f"{eng_label} Agent: {agent['name']} ({agent['role']})"},
-            verify=False,
-            timeout=3
-        )
+        pve_api_request("put", agent, "config", json={"description": f"{eng_label} Agent: {agent['name']} ({agent['role']})"}, timeout=3)
     except Exception:
         pass
     
-    # Push engine type change to the running container
+    # Push engine type change to the running container/VM
     if new_type:
         try:
             agent_port = agent.get("port", 8000)
@@ -5109,7 +6185,7 @@ def rename_agent_route():
                 timeout=5
             )
         except Exception:
-            pass  # Container may be offline — engine will apply on next boot via marker file
+            pass  # Node may be offline — engine will apply on next boot via marker file
     
     return jsonify({"success": True, "agent": agent})
 
@@ -5123,16 +6199,11 @@ def remove_agent_route():
     if not agent:
         return jsonify({"error": "Agent not found"}), 404
     
-    # 1. Stop container if running
+    # 1. Stop container/VM if running
     vmid = agent.get("vmid")
     if vmid:
         try:
-            requests.post(
-                f"{PROXMOX_API}/nodes/pve/lxc/{vmid}/status/stop",
-                headers={"Authorization": PROXMOX_TOKEN},
-                verify=False,
-                timeout=5
-            )
+            pve_api_request("post", agent, "status/stop", timeout=5)
         except Exception:
             pass
 
@@ -5140,14 +6211,9 @@ def remove_agent_route():
         if purge_pve:
             try:
                 time.sleep(1)
-                requests.delete(
-                    f"{PROXMOX_API}/nodes/pve/lxc/{vmid}",
-                    headers={"Authorization": PROXMOX_TOKEN},
-                    verify=False,
-                    timeout=8
-                )
+                pve_api_request("delete", agent, "", timeout=8)
             except Exception as pe:
-                print(f"Failed to purge container {vmid} on PVE:", pe)
+                print(f"Failed to purge node {vmid} on PVE:", pe)
     
     # 3. Remove from AGENTS list and save
     AGENTS.remove(agent)
@@ -5161,6 +6227,10 @@ def add_agent_route():
     name = (data.get("name") or "").strip()
     role = (data.get("role") or "Specialist").strip()
     agent_type = (data.get("type") or data.get("engine") or "antigravity").strip().lower()
+    vm_type = (data.get("vm_type") or "").strip().lower()
+    if vm_type not in ["qemu", "lxc"]:
+        vm_type = "qemu" if agent_type in ["hermes", "openclaw"] else "lxc"
+        
     ip = (data.get("ip") or "").strip()
     vmid = int(data.get("vmid") or (150 + len(AGENTS) + 1))
     port = int(data.get("port") or 8000)
@@ -5191,6 +6261,7 @@ def add_agent_route():
         "vmid": vmid,
         "name": name,
         "type": agent_type,
+        "vm_type": vm_type,
         "role": role,
         "ip": ip,
         "port": port,
@@ -5785,6 +6856,211 @@ def rename_workspace_route(ws_id):
     ws["updated_at"] = time.time()
     save_workspaces()
     return jsonify({"success": True, "workspace": ws})
+
+# ==================================================================
+# CEO ORCHESTRATOR & AUTONOMOUS HEARTBEAT SUPERVISOR (PAPERCLIP)
+# ==================================================================
+ceo_orchestrator = None
+ceo_supervisor = None
+
+if CeoOrchestrator:
+    try:
+        ceo_orchestrator = CeoOrchestrator(
+            get_agents_fn=lambda: AGENTS,
+            dispatch_fn=lambda target, prompt, workspace_id: dispatch_task_internal(target=target, prompt=prompt, ws_id=workspace_id)
+        )
+        ceo_supervisor = CeoHeartbeatSupervisor(
+            orchestrator=ceo_orchestrator,
+            get_agents_fn=lambda: AGENTS,
+            get_agent_status_fn=get_single_agent_status,
+            interval_seconds=30
+        )
+        ceo_supervisor.start()
+        print("[CEO Engine] Autonomous Heartbeat Supervisor active (30s cadence)")
+    except Exception as e:
+        print(f"[CEO Engine] Warning: Failed to start CEO supervisor: {e}")
+
+@app.route("/api/ceo/order", methods=["POST"])
+def ceo_post_directive():
+    if not ceo_orchestrator:
+        return jsonify({"error": "CEO Orchestrator engine not initialized"}), 503
+    data = request.get_json(force=True, silent=True) or {}
+    text = (data.get("directive") or "").strip()
+    if not text:
+        return jsonify({"error": "Directive text is required"}), 400
+        
+    ws_id = data.get("workspace_id")
+    prio = data.get("priority", "high")
+    
+    directive_entry, created_orders = ceo_orchestrator.receive_board_directive(
+        directive_text=text,
+        workspace_id=ws_id,
+        priority=prio
+    )
+    
+    # Run immediate heartbeat pulse to kick off ready tasks
+    if ceo_supervisor:
+        try:
+            ceo_supervisor.pulse()
+        except Exception:
+            pass
+            
+    return jsonify({
+        "success": True,
+        "directive": directive_entry,
+        "tasks": [wo.to_dict() for wo in created_orders]
+    })
+
+@app.route("/api/ceo/status", methods=["GET"])
+def ceo_get_status():
+    if not ceo_orchestrator:
+        return jsonify({"error": "CEO Orchestrator engine not initialized"}), 503
+        
+    metrics = ceo_orchestrator.get_summary_metrics()
+    chain = get_chain_of_command() if get_chain_of_command else {}
+    
+    hb_info = {
+        "count": ceo_supervisor.heartbeat_count if ceo_supervisor else 0,
+        "timestamp": ceo_supervisor.last_heartbeat_time if ceo_supervisor else 0,
+        "log": ceo_supervisor.last_heartbeat_log if ceo_supervisor else [],
+        "escalations": ceo_supervisor.active_escalations if ceo_supervisor else []
+    }
+    
+    return jsonify({
+        "executive_summary": ceo_orchestrator.executive_summary,
+        "metrics": metrics,
+        "heartbeat": hb_info,
+        "audit_log": ceo_orchestrator.audit_log[-50:],
+        "chain_of_command": chain,
+        "roles": ROLE_DEFINITIONS
+    })
+
+@app.route("/api/ceo/heartbeat", methods=["POST"])
+def ceo_trigger_heartbeat():
+    if not ceo_supervisor:
+        return jsonify({"error": "CEO Heartbeat supervisor not initialized"}), 503
+    pulse_res = ceo_supervisor.pulse()
+    return jsonify({"success": True, "pulse": pulse_res})
+
+@app.route("/api/ceo/tasks", methods=["GET"])
+def ceo_get_tasks():
+    if not ceo_orchestrator:
+        return jsonify({"error": "CEO Orchestrator engine not initialized"}), 503
+        
+    status_filter = request.args.get("status")
+    role_filter = request.args.get("role")
+    agent_filter = request.args.get("agent_id")
+    
+    tasks = list(ceo_orchestrator.work_orders.values())
+    if status_filter:
+        tasks = [t for t in tasks if t.status == status_filter]
+    if role_filter:
+        tasks = [t for t in tasks if t.role == role_filter]
+    if agent_filter:
+        tasks = [t for t in tasks if t.assigned_agent_id == agent_filter]
+        
+    tasks.sort(key=lambda t: t.created_at, reverse=True)
+    return jsonify({"tasks": [t.to_dict() for t in tasks]})
+
+@app.route("/api/ceo/tasks/<order_id>/action", methods=["POST"])
+def ceo_task_action(order_id):
+    if not ceo_orchestrator:
+        return jsonify({"error": "CEO Orchestrator engine not initialized"}), 503
+        
+    data = request.get_json(force=True, silent=True) or {}
+    action = data.get("action")
+    note = data.get("note")
+    
+    if action == "dispatch":
+        success, msg = ceo_orchestrator.dispatch_work_order(order_id)
+        return jsonify({"success": success, "message": str(msg)})
+    elif action == "approve":
+        success, msg = ceo_orchestrator.update_task_status(order_id, "done", note=note or "Manually approved by Board/CEO")
+        return jsonify({"success": success, "message": msg})
+    elif action == "reject":
+        success, msg = ceo_orchestrator.update_task_status(order_id, "todo", note=note or "Returned for revision")
+        return jsonify({"success": success, "message": msg})
+    elif action == "block":
+        success, msg = ceo_orchestrator.update_task_status(order_id, "blocked", note=note or "Blocked by Board/CEO")
+        return jsonify({"success": success, "message": msg})
+    elif action == "reassign":
+        new_agent = data.get("agent_id")
+        wo = ceo_orchestrator.work_orders.get(order_id)
+        if not wo:
+            return jsonify({"error": "Task not found"}), 404
+        wo.assigned_agent_id = new_agent
+        ceo_orchestrator.save_state()
+        return jsonify({"success": True, "message": f"Task reassigned to {new_agent}"})
+        
+    return jsonify({"error": f"Unknown action: {action}"}), 400
+
+@app.route("/api/ceo/role", methods=["POST"])
+def ceo_update_role():
+    data = request.get_json(force=True, silent=True) or {}
+    agent_id = data.get("agent_id")
+    role_id = data.get("role")
+    
+    agent = next((a for a in AGENTS if a["id"] == agent_id), None)
+    if not agent:
+        return jsonify({"error": "Agent not found"}), 404
+        
+    role_spec = get_role_spec(role_id) if get_role_spec else None
+    role_name = role_spec["name"] if role_spec else role_id
+    
+    agent["role"] = role_name
+    save_agents_config()
+    
+    if ceo_orchestrator:
+        ceo_orchestrator.log_event("agent_role_updated", f"Agent {agent['name']} ({agent_id}) reassigned to role {role_name}", {
+            "agent_id": agent_id,
+            "role": role_name
+        })
+        
+    return jsonify({"success": True, "agent": agent})
+
+@app.route("/api/ceo/org", methods=["GET"])
+def ceo_get_org():
+    roles = ROLE_DEFINITIONS if ROLE_DEFINITIONS else []
+    enriched_agents = []
+    for a in AGENTS:
+        status_info = get_single_agent_status(a["id"])
+        enriched_agents.append({
+            "id": a["id"],
+            "vmid": a.get("vmid"),
+            "name": a.get("name"),
+            "type": a.get("type", "antigravity"),
+            "role": a.get("role", "Frontend Specialist"),
+            "ip": a.get("ip"),
+            "port": a.get("port"),
+            "status": status_info.get("status", "offline"),
+            "busy": status_info.get("busy", False)
+        })
+        
+    chain = get_chain_of_command() if get_chain_of_command else {}
+    return jsonify({
+        "chain_of_command": chain,
+        "agents": enriched_agents,
+        "roles": roles
+    })
+
+@app.route("/api/ceo/prompts/<prompt_name>", methods=["GET"])
+def ceo_get_prompt(prompt_name):
+    allowed = ["AGENTS.md", "SOUL.md", "HEARTBEAT.md"]
+    if prompt_name not in allowed:
+        return jsonify({"error": "Invalid prompt name"}), 400
+        
+    prompt_path = os.path.join(SCRIPT_DIR, "ceo", "prompts", prompt_name)
+    if not os.path.exists(prompt_path):
+        prompt_path = os.path.join("/usr/local/share/cockpit/ceo/prompts", prompt_name)
+        
+    if os.path.exists(prompt_path):
+        try:
+            with open(prompt_path, "r", encoding="utf-8") as f:
+                return jsonify({"name": prompt_name, "content": f.read()})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+            
+    return jsonify({"error": f"Prompt file {prompt_name} not found"}), 404
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=3000)

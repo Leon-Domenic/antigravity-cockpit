@@ -18,3 +18,7 @@ Thumbs.db
 # Env / secrets
 .env
 *.env
+
+# Local state
+ceo_state.json
+workspaces_meta.json

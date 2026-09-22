@@ -1,8 +1,8 @@
 # Antigravity Cockpit
 
-A self-hosted multi-agent orchestration system for running and controlling [Antigravity AI](https://antigravity.dev) instances on **Proxmox LXC containers**.
+A self-hosted multi-agent orchestration system for running and controlling [Antigravity AI](https://antigravity.dev), **Codex Engine**, **Nous Hermes**, **Open Claw**, and **Paperclip CEO** instances on **Proxmox VE (LXC Containers & KVM Virtual Machines)**.
 
-Includes a web dashboard, a per-agent API bridge, and a CDP-based prompt injection engine that types directly into running Antigravity GUI sessions.
+Includes a web dashboard, per-agent API bridges, automated Proxmox provisioners, dedicated engine installers, and a CDP-based prompt injection engine that interacts directly with running agent sessions.
 
 ---
 
@@ -10,38 +10,80 @@ Includes a web dashboard, a per-agent API bridge, and a CDP-based prompt injecti
 
 ```
 Proxmox PVE (192.168.178.105)
-├── CT 150  agy-cockpit     :3000   ← Web dashboard (this)
-├── CT 151  agy-agent-1     :8000   ← Antigravity instance + agent bridge
-├── CT 152  agy-agent-2     :8000   ← Antigravity instance + agent bridge
-└── CT 153+ agy-agent-N     :8000   ← Additional agents (Codex, Hermes, …)
+├── CT 150  agy-cockpit     :3000   ← Web dashboard + CEO Engine
+├── CT 151  agy-agent-1     :8000   ← Antigravity (Frontend Specialist) [LXC]
+├── CT 152  agy-agent-2     :8000   ← Antigravity (Backend Specialist)  [LXC]
+├── CT 153  agy-codex       :8000   ← Codex (Code Synthesis)           [LXC]
+├── VM 154  agy-hermes      :8000   ← Hermes Agent (Local LLM / Tools)  [KVM VM]
+└── VM 155  agy-openclaw    :8000   ← Open Claw (Playwright Crawler)    [KVM VM]
 ```
 
-Each **agent container** runs:
-- `Xvfb :1` virtual display
-- `openbox` window manager
-- Antigravity Electron app (authenticated)
-- `x11vnc` → `websockify` → noVNC (live desktop at `:6080`)
+Each **agent node** runs:
+- `Xvfb :1` virtual display (for visual agents: Antigravity, Open Claw)
+- `openbox` lightweight window manager
+- Engine stack (Antigravity Electron, Node/Python Codex toolchain, Ollama/Docker Hermes, or Playwright Chromium)
+- `x11vnc` → `websockify` → noVNC (live desktop inspection at `:6080`)
 - `agent-bridge` Flask API (`:8000`)
 
-The **cockpit** (CT 150) hosts the dashboard and talks to the Proxmox API and each agent bridge.
+The **Cockpit** (CT 150) hosts the dashboard, acts as package repository for agent installers, and controls Proxmox VE via both `/nodes/pve/lxc` and `/nodes/pve/qemu` APIs.
 
 ---
 
-## Components
+## Engine Hardware & Virtualization Requirements
 
-### `cockpit/cockpit_server.py`
+Different agent frameworks have distinct kernel and hardware requirements. The Cockpit categorizes each engine accordingly:
 
-Flask web dashboard — the main control plane.
+| Engine | Target Virt | Recommended Hardware | Minimum Hardware | Key Architectural Rationale |
+|---|---|---|---|---|
+| **`antigravity`** | **LXC Container** (or VM) | 4 vCPU, 8 GB RAM, 30 GB SSD | 2 vCPU, 4 GB RAM, 20 GB SSD | Runs lightweight Xvfb + Openbox GUI desktop, Chromium browser, noVNC display server, and Antigravity Skills runner. |
+| **`codex`** | **LXC Container** (or VM) | 4 vCPU, 8 GB RAM, 40 GB SSD | 2 vCPU, 4 GB RAM, 30 GB SSD | Node.js 20 LTS, pnpm, Python AST analyzers, code linters, and headless autonomous development toolchain. |
+| **`hermes`** | **KVM Virtual Machine (Required)** | 8 vCPU (`host`), 32 GB RAM, 100 GB SSD | 4 vCPU, 16 GB RAM, 60 GB SSD | **Requires hardware AVX-512 flags**, nested Docker engine without LXC cgroup restrictions, and optional PCIe GPU passthrough (CUDA/ROCm) for local LLMs (Ollama / Hermes-3). |
+| **`openclaw`** | **KVM Virtual Machine (Required)** | 8 vCPU, 16 GB RAM, 80 GB SSD | 4 vCPU, 8 GB RAM, 50 GB SSD | **Requires full user namespaces (`clone3`)**, AppArmor/seccomp enforcement for Playwright/Chromium sandbox (which fails in unprivileged LXCs), and isolated network stack for rotating proxies/WireGuard. |
+| **`ceo`** | **LXC Container** (or Host) | 4 vCPU, 4 GB RAM, 20 GB SSD | 2 vCPU, 2 GB RAM, 15 GB SSD | Paperclip executive governance, heartbeat supervisor, strategic work order generation, and cross-agent delegation. |
 
-**Features:**
-- Fleet management: start / stop / rename / remove containers via Proxmox API
-- Task Dispatcher: type a prompt (+ drag-and-drop screenshots) into any agent
-- Broadcast Mode: send the same task to all running agents simultaneously  
-- Skills Hub: two-way capability manager — push skills to any agent's `~/.gemini/skills/`, download/export skills to `.zip` / `.tar.gz`, or import new skills via drag & drop
-- **Workspaces**: Import your project directly into the Cockpit, browse files in the built-in Code Inspector, deploy to any agent with one click, and pull agent changes back
-- Add new agents — choose engine type: Antigravity, Codex, Hermes Agent, Open Claw
-- Real-time status polling: CPU, RAM, auth state, busy/idle
-- Three dark UI themes: **Onyx Stealth**, **Cobalt Hyperdrive**, **Tokyo Neon**
+> [!IMPORTANT]
+> **Why do Hermes and Open Claw need KVM Virtual Machines?**
+> 1. **Hermes Agent**: Relies on nested containerization (Docker) for safely running untrusted code and tools generated by LLM reasoning steps. Unprivileged LXC containers impose strict cgroup v2 constraints and namespace barriers that break Docker-in-LXC without insecure host configurations. Furthermore, local LLM execution (Ollama, llama.cpp, vLLM) requires AVX-512 CPU flags (`--cpu host`) or PCIe GPU passthrough, which are natively supported in KVM QEMU VMs.
+> 2. **Open Claw**: Relies on Chromium and Playwright for headless and headful DOM automation. Chromium's security sandbox relies heavily on unprivileged user namespaces (`CLONE_NEWUSER`), `clone3`, and PID namespaces. In standard Proxmox LXC containers, user namespaces are already remapped, causing Chromium to crash unless run with `--no-sandbox` (which compromises security during real-world crawling). Additionally, high-concurrency web crawling with proxy rotation (WireGuard, Tor, proxychains) requires independent kernel networking modules.
+
+---
+
+## Agent Installers & Automation
+
+Antigravity Cockpit provides dedicated, modular installer packages located in `agent/installers/`:
+
+- **`agent/install.sh`**: Universal bootstrap dispatcher. Accepts `--engine <name>` and downloads the matching engine installer from the Cockpit server. Performs pre-flight hardware and virtualization checks.
+- **`agent/installers/common.sh`**: Shared foundation module with `detect_virt`, `check_system_resources`, core system packages, and automated agent bridge/skills library installation.
+- **`agent/installers/install_antigravity.sh`**: Deploys Google Antigravity Electron IDE, Openbox desktop, and noVNC service.
+- **`agent/installers/install_codex.sh`**: Deploys Node.js 20 LTS, pnpm, Python AST analyzers, code linters, and headless agent bridge.
+- **`agent/installers/install_hermes.sh`**: Sets up Docker runtime, LangChain, Pydantic, Ollama local model server, and verifies KVM virtualization.
+- **`agent/installers/install_openclaw.sh`**: Sets up Playwright with browser binaries, Chromium namespace configurations, and crawl libraries.
+- **`agent/installers/install_ceo.sh`**: Deploys Paperclip CEO operational prompts and governance hooks.
+
+### Automated Proxmox VE Provisioning (`scripts/pve_provision_agent.sh`)
+
+You can provision a complete agent directly from your Proxmox VE host terminal in one command:
+
+```bash
+# Provision a dedicated KVM VM for Hermes Agent:
+curl -sSL http://192.168.178.168:3000/packages/scripts/pve_provision_agent.sh | bash -s -- --engine hermes --vmid 160 --ip 192.168.178.180
+
+# Provision a dedicated KVM VM for Open Claw:
+curl -sSL http://192.168.178.168:3000/packages/scripts/pve_provision_agent.sh | bash -s -- --engine openclaw --vmid 161 --ip 192.168.178.181
+
+# Provision a lean LXC container for Codex:
+curl -sSL http://192.168.178.168:3000/packages/scripts/pve_provision_agent.sh | bash -s -- --engine codex --vmid 162 --ip 192.168.178.182
+```
+
+### Guest Self-Bootstrap
+
+Inside any running Debian 12 / Ubuntu 22.04+ node:
+
+```bash
+curl -sSL http://192.168.178.168:3000/install.sh | bash -s -- --engine <antigravity|codex|hermes|openclaw|ceo>
+```
+
+---
 
 ### `agent/agent_bridge.py`
 
