@@ -12,6 +12,19 @@ SKILL_DIRS = [
     "/home/ubuntu/.gemini/skills",
     "/root/.gemini/antigravity/builtin/skills"
 ]
+AGENT_TYPE_FILE = "/etc/antigravity/agent_type"
+
+def get_engine_type():
+    """Read the configured engine type from the marker file."""
+    try:
+        if os.path.exists(AGENT_TYPE_FILE):
+            with open(AGENT_TYPE_FILE, "r") as f:
+                engine = f.read().strip().lower()
+                if engine:
+                    return engine
+    except Exception:
+        pass
+    return "antigravity"
 
 def get_auth_status():
     paths = [
@@ -238,6 +251,7 @@ def auto_confirm_permissions():
 def status():
     return jsonify({
         "agent_id": os.uname().nodename,
+        "engine_type": get_engine_type(),
         "authenticated": get_auth_status(),
         "status": "busy" if (CURRENT_TASK and CURRENT_TASK.get("running")) else "idle",
         "current_task": CURRENT_TASK
@@ -397,48 +411,56 @@ def dispatch():
     
     def run_agent():
         global CURRENT_TASK
+        engine = get_engine_type()
         try:
             start_new = data.get("new_conversation", False)
-            inject_into_antigravity(effective_prompt, start_new_conversation=start_new)
-            LOG_HISTORY.append({"type": "info", "time": time.strftime("%H:%M:%S"), "text": "Γ£à Prompt successfully delivered to Antigravity GUI"})
-            
-            # Monitor language_server.log to track response activity
-            log_path = "/root/.config/Antigravity/logs/language_server.log"
-            start_offset = os.path.getsize(log_path) if os.path.exists(log_path) else 0
-            
-            end_time = time.time() + 35
-            last_activity = time.time()
-            
-            while time.time() < end_time:
-                time.sleep(1.5)
-                # Auto-confirm any permission modals (e.g. read access to attached files)
-                confirmed = auto_confirm_permissions()
-                if confirmed:
-                    LOG_HISTORY.append({"type": "info", "time": time.strftime("%H:%M:%S"), "text": "≡ƒöô Auto-confirmed tool/file permission dialog"})
-                    last_activity = time.time()
+            if engine == "antigravity":
+                # Antigravity engine: use CDP injection into the Electron app
+                inject_into_antigravity(effective_prompt, start_new_conversation=start_new)
+                LOG_HISTORY.append({"type": "info", "time": time.strftime("%H:%M:%S"), "text": "Prompt successfully delivered to Antigravity GUI"})
+                
+                # Monitor language_server.log to track response activity
+                log_path = "/root/.config/Antigravity/logs/language_server.log"
+                start_offset = os.path.getsize(log_path) if os.path.exists(log_path) else 0
+                
+                end_time = time.time() + 35
+                last_activity = time.time()
+                
+                while time.time() < end_time:
+                    time.sleep(1.5)
+                    # Auto-confirm any permission modals (e.g. read access to attached files)
+                    confirmed = auto_confirm_permissions()
+                    if confirmed:
+                        LOG_HISTORY.append({"type": "info", "time": time.strftime("%H:%M:%S"), "text": "Auto-confirmed tool/file permission dialog"})
+                        last_activity = time.time()
 
-                if os.path.exists(log_path):
-                    current_size = os.path.getsize(log_path)
-                    if current_size > start_offset:
-                        with open(log_path, "r", errors="ignore") as f:
-                            f.seek(start_offset)
-                            new_data = f.read()
-                            start_offset = current_size
-                            for line in new_data.splitlines():
-                                line_str = line.strip()
-                                if line_str and ("streamGenerateContent" in line_str or "SEND_USER" in line_str or "latency" in line_str):
-                                    LOG_HISTORY.append({"type": "output", "time": time.strftime("%H:%M:%S"), "text": line_str[-120:]})
-                                    last_activity = time.time()
-                if time.time() - last_activity > 10:
-                    break
+                    if os.path.exists(log_path):
+                        current_size = os.path.getsize(log_path)
+                        if current_size > start_offset:
+                            with open(log_path, "r", errors="ignore") as f:
+                                f.seek(start_offset)
+                                new_data = f.read()
+                                start_offset = current_size
+                                for line in new_data.splitlines():
+                                    line_str = line.strip()
+                                    if line_str and ("streamGenerateContent" in line_str or "SEND_USER" in line_str or "latency" in line_str):
+                                        LOG_HISTORY.append({"type": "output", "time": time.strftime("%H:%M:%S"), "text": line_str[-120:]})
+                                        last_activity = time.time()
+                    if time.time() - last_activity > 10:
+                        break
+            else:
+                # Non-Antigravity engines: use generic X11 keyboard injection
+                x11_inject(effective_prompt)
+                LOG_HISTORY.append({"type": "info", "time": time.strftime("%H:%M:%S"), "text": f"Prompt delivered via X11 injection (engine: {engine})"})
         except Exception as err:
             LOG_HISTORY.append({"type": "error", "time": time.strftime("%H:%M:%S"), "text": f"Error during injection: {err}"})
         finally:
             CURRENT_TASK["running"] = False
             LOG_HISTORY.append({"type": "info", "time": time.strftime("%H:%M:%S"), "text": "Task execution completed."})
     
+    engine = get_engine_type()
     threading.Thread(target=run_agent, daemon=True).start()
-    return jsonify({"success": True, "message": "Task dispatched directly into Antigravity", "saved_images": saved_images_paths})
+    return jsonify({"success": True, "engine_type": engine, "message": f"Task dispatched (engine: {engine})", "saved_images": saved_images_paths})
 
 @app.route("/restart_desktop", methods=["POST"])
 def restart_desktop():
@@ -447,6 +469,49 @@ def restart_desktop():
         return jsonify({"success": True, "message": "Desktop service restarting..."})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/configure_engine", methods=["POST"])
+def configure_engine():
+    """Push a new engine type to this container and optionally restart desktop."""
+    data = request.json or {}
+    engine = (data.get("engine_type") or data.get("engine") or "").strip().lower()
+    restart = data.get("restart_desktop", True)
+
+    if not engine:
+        return jsonify({"error": "engine_type is required"}), 400
+
+    valid_engines = ["antigravity", "codex", "hermes", "openclaw", "custom"]
+    if engine not in valid_engines:
+        return jsonify({"error": f"Unknown engine '{engine}'. Valid: {valid_engines}"}), 400
+
+    try:
+        os.makedirs(os.path.dirname(AGENT_TYPE_FILE), exist_ok=True)
+        with open(AGENT_TYPE_FILE, "w") as f:
+            f.write(engine)
+        LOG_HISTORY.append({
+            "type": "info",
+            "time": time.strftime("%H:%M:%S"),
+            "text": f"Engine type updated to '{engine}'"
+        })
+    except Exception as e:
+        return jsonify({"error": f"Failed to write engine type: {e}"}), 500
+
+    if restart:
+        try:
+            subprocess.Popen(["systemctl", "restart", "webdesktop"])
+            LOG_HISTORY.append({
+                "type": "info",
+                "time": time.strftime("%H:%M:%S"),
+                "text": "Restarting webdesktop service for engine change..."
+            })
+        except Exception as e:
+            LOG_HISTORY.append({
+                "type": "error",
+                "time": time.strftime("%H:%M:%S"),
+                "text": f"Failed to restart webdesktop: {e}"
+            })
+
+    return jsonify({"success": True, "engine_type": engine, "restarted": restart})
 
 # ------------------------------------------------------------------
 # SKILLS MANAGEMENT API
@@ -794,6 +859,156 @@ def clean_workspace():
         "text": f"🧹 Workspace cleaned ({cleaned} items removed)"
     })
     return jsonify({"success": True, "cleaned_items": cleaned})
+
+@app.route("/workspace/git_clone", methods=["POST"])
+def workspace_git_clone():
+    data = request.get_json(force=True, silent=True) or {}
+    raw_repo_url = (data.get("repo_url") or "").strip()
+    branch = (data.get("branch") or "").strip()
+    ws_name = (data.get("workspace_name") or "").strip()
+    ws_id = data.get("workspace_id") or f"ws_git_{int(time.time())}"
+    token = (data.get("token") or "").strip()
+    clean_first = bool(data.get("clean_first", True))
+
+    if not raw_repo_url:
+        return jsonify({"error": "Repository URL is required"}), 400
+
+    repo_url = raw_repo_url
+    if not (repo_url.startswith("http://") or repo_url.startswith("https://") or repo_url.startswith("git@") or repo_url.startswith("ssh://")):
+        parts = repo_url.split("/")
+        if len(parts) == 2 and "." not in parts[0]:
+            repo_url = f"https://github.com/{parts[0]}/{parts[1]}.git"
+
+    clone_url = repo_url
+    safe_url = repo_url
+    if token:
+        if "github.com" in repo_url:
+            clean = re.sub(r'https?://([^@]+@)?github\.com/', '', repo_url)
+            clone_url = f"https://{token}@github.com/{clean}"
+        elif "gitlab.com" in repo_url:
+            clean = re.sub(r'https?://([^@]+@)?gitlab\.com/', '', repo_url)
+            clone_url = f"https://oauth2:{token}@gitlab.com/{clean}"
+
+    if not ws_name:
+        clean = safe_url.rstrip("/").split("/")[-1]
+        if clean.endswith(".git"):
+            clean = clean[:-4]
+        ws_name = clean or f"git_repo_{int(time.time())}"
+
+    primary_ws = get_primary_workspace()
+
+    try:
+        for ws_dir in AGENT_WORKSPACE_PATHS:
+            os.makedirs(ws_dir, exist_ok=True)
+            if clean_first:
+                for item in os.listdir(ws_dir):
+                    if item == "media":
+                        continue
+                    ipath = os.path.join(ws_dir, item)
+                    if os.path.isdir(ipath):
+                        shutil.rmtree(ipath, ignore_errors=True)
+                    else:
+                        try:
+                            os.remove(ipath)
+                        except Exception:
+                            pass
+
+        cmd = ["git", "clone", "--depth", "1"]
+        if branch:
+            cmd.extend(["--branch", branch])
+        cmd.extend([clone_url, primary_ws])
+
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if res.returncode != 0:
+            err_msg = res.stderr or res.stdout
+            if token:
+                err_msg = err_msg.replace(token, "******")
+            return jsonify({"error": f"Agent Git clone failed: {err_msg}"}), 400
+
+        try:
+            subprocess.run(["chown", "-R", "ubuntu:ubuntu", "/home/ubuntu/workspace"], check=False)
+            subprocess.run(["chmod", "-R", "u+rw", "/home/ubuntu/workspace"], check=False)
+        except Exception:
+            pass
+
+        manifest = {
+            "workspace_id": ws_id,
+            "workspace_name": ws_name,
+            "source": "git",
+            "git_url": safe_url,
+            "deployed_at": time.time(),
+            "deployed_time": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        for ws_dir in AGENT_WORKSPACE_PATHS:
+            try:
+                with open(os.path.join(ws_dir, ".cockpit_workspace.json"), "w", encoding="utf-8") as mf:
+                    json.dump(manifest, mf, indent=2)
+            except Exception:
+                pass
+
+        file_count = 0
+        total_size = 0
+        for root, dirs, files in os.walk(primary_ws):
+            dirs[:] = [d for d in dirs if d not in [".git", "node_modules", "__pycache__"]]
+            file_count += len(files)
+            for f in files:
+                try:
+                    total_size += os.path.getsize(os.path.join(root, f))
+                except Exception:
+                    pass
+
+        LOG_HISTORY.append({
+            "type": "info",
+            "time": time.strftime("%H:%M:%S"),
+            "text": f"🌿 Git repository '{ws_name}' ({file_count} files) cloned into {primary_ws}"
+        })
+
+        return jsonify({
+            "success": True,
+            "message": f"Git repository '{ws_name}' cloned successfully into agent",
+            "workspace_id": ws_id,
+            "workspace_name": ws_name,
+            "file_count": file_count,
+            "size_bytes": total_size,
+            "path": primary_ws
+        })
+    except Exception as e:
+        err_msg = str(e)
+        if token:
+            err_msg = err_msg.replace(token, "******")
+        LOG_HISTORY.append({
+            "type": "error",
+            "time": time.strftime("%H:%M:%S"),
+            "text": f"Failed to git clone into workspace: {err_msg}"
+        })
+        return jsonify({"error": err_msg}), 500
+
+@app.route("/workspace/git_pull", methods=["POST"])
+def workspace_git_pull():
+    primary_ws = get_primary_workspace()
+    if not os.path.exists(os.path.join(primary_ws, ".git")):
+        return jsonify({"error": "Active workspace is not a Git repository"}), 400
+
+    try:
+        res = subprocess.run(["git", "-C", primary_ws, "pull"], capture_output=True, text=True, timeout=60)
+        if res.returncode != 0:
+            return jsonify({"error": f"Agent Git pull failed: {res.stderr or res.stdout}"}), 400
+
+        try:
+            subprocess.run(["chown", "-R", "ubuntu:ubuntu", "/home/ubuntu/workspace"], check=False)
+            subprocess.run(["chmod", "-R", "u+rw", "/home/ubuntu/workspace"], check=False)
+        except Exception:
+            pass
+
+        LOG_HISTORY.append({
+            "type": "info",
+            "time": time.strftime("%H:%M:%S"),
+            "text": "🌿 Pulled latest changes from remote Git repository"
+        })
+
+        return jsonify({"success": True, "output": res.stdout.strip()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)

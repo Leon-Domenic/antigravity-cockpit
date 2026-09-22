@@ -61,6 +61,8 @@ Flask REST API running on each agent container.
 | `GET /workspace/status` | Report active workspace name, file count, and size |
 | `GET /workspace/export` | Export current workspace as base64 tar.gz for Cockpit pull |
 | `POST /workspace/clean` | Clear the agent workspace (preserves `/media`) |
+| `POST /workspace/git_clone` | Clone a Git repository directly into `/home/ubuntu/workspace` |
+| `POST /workspace/git_pull` | Pull latest commits inside active agent workspace |
 
 ### `agent/antigravity_injector.py`
 
@@ -186,8 +188,8 @@ Cockpit Workspaces Store (/usr/local/share/cockpit/workspaces/<ws-id>/)
 
 | Method | How |
 |---|---|
+| **Git Import** | Clone public or private repositories using full HTTPS URLs or shorthand (e.g. `facebook/react`, `owner/repo@branch`). Supports branch selection, GitHub/GitLab Personal Access Tokens (PAT) for private repos, popular starter presets, and shallow clone (`--depth 1`). |
 | **Upload archive** | Drag & drop a `.zip`, `.tar.gz`, or `.tar` file onto the drop zone. GitHub/GitLab zips (with single root folder) are auto-flattened. |
-| **Git clone** | Paste any HTTPS/SSH repo URL (+ optional branch). Uses `git clone --depth 1`. |
 | **Starter template** | Pick React/Vite+TS, Node.js/Express, Python/Flask, or Blank and the Cockpit scaffolds it instantly. |
 
 ### Cockpit API endpoints
@@ -196,7 +198,9 @@ Cockpit Workspaces Store (/usr/local/share/cockpit/workspaces/<ws-id>/)
 |---|---|---|
 | `/api/workspaces` | `GET` | List all stored workspaces with stats |
 | `/api/workspaces/upload` | `POST` | Upload a project archive (multipart or base64 JSON) |
-| `/api/workspaces/git_clone` | `POST` | Clone a Git repository |
+| `/api/workspaces/git_clone` | `POST` | Clone a Git repository (shorthand `owner/repo`, branch, PAT support) |
+| `/api/workspaces/<id>/git_pull` | `POST` | Pull latest commits from upstream Git remote and auto-sync mounted agents |
+| `/api/workspaces/<id>/git_status` | `GET` | Return Git branch, latest commit SHA, commit author, message, and dirty state |
 | `/api/workspaces/create_template` | `POST` | Scaffold a starter template |
 | `/api/workspaces/<id>/tree` | `GET` | Return file-tree JSON for the Code Inspector |
 | `/api/workspaces/<id>/file` | `GET` | Read a file's content (path-traversal protected) |
@@ -214,6 +218,8 @@ Cockpit Workspaces Store (/usr/local/share/cockpit/workspaces/<ws-id>/)
 | `/workspace/status` | `GET` | Returns active workspace ID, name, file count, size, deploy timestamp. |
 | `/workspace/export` | `GET` | Streams back a base64 tar.gz of the current agent workspace (excludes `.git`, `node_modules`, `__pycache__`). |
 | `/workspace/clean` | `POST` | Removes all items from the agent workspace (preserves the `media/` subfolder). |
+| `/workspace/git_clone` | `POST` | Clone a Git repository directly into `/home/ubuntu/workspace` on the agent container. |
+| `/workspace/git_pull` | `POST` | Run `git pull` directly inside the agent workspace. |
 
 ### Tech stack detection
 

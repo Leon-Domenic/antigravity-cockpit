@@ -7,8 +7,10 @@ let match;
 let count = 0;
 while ((match = scriptRegex.exec(content)) !== null) {
   count++;
+  // Replace Python interpolations like """ + json.dumps(AGENTS) + """
+  let code = match[1].replace(/"""\s*\+\s*json\.dumps\([^)]+\)\s*\+\s*"""/g, '[]');
   try {
-    new vm.Script(match[1]);
+    new vm.Script(code);
     console.log("Script tag " + count + ": Syntax OK! (" + match[1].length + " bytes)");
   } catch (err) {
     console.error("Script tag " + count + " syntax error:", err.message);

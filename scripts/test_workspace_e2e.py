@@ -191,7 +191,97 @@ def run_tests():
         assert len(remaining) == 0, f"Expected 0 items, got {remaining}"
         print("  -> Passed!")
 
-        print("\n>>> ALL 7 WORKSPACE SUITE TESTS PASSED PERFECTLY! <<<")
+        # ----------------------------------------------------
+        # 8. Test Git URL Normalization & Token Injection
+        # ----------------------------------------------------
+        print("\n[TEST 8] Git URL Normalization & Auth...")
+        clone_url, safe_url, branch = cockpit_server.normalize_git_url("facebook/react")
+        assert clone_url == "https://github.com/facebook/react.git"
+        assert safe_url == "https://github.com/facebook/react.git"
+        assert branch is None
+
+        clone_url, safe_url, branch = cockpit_server.normalize_git_url("shadcn/ui@next")
+        assert clone_url == "https://github.com/shadcn/ui.git"
+        assert branch == "next"
+
+        clone_url, safe_url, branch = cockpit_server.normalize_git_url("https://github.com/private/repo.git", token="ghp_mySecretToken123")
+        assert "ghp_mySecretToken123@github.com" in clone_url
+        assert "ghp_mySecretToken123" not in safe_url
+        assert safe_url == "https://github.com/private/repo.git"
+        print("  -> Passed!")
+
+        # ----------------------------------------------------
+        # 9. Test Local Git Clone & Git Pull (Cockpit)
+        # ----------------------------------------------------
+        print("\n[TEST 9] Local Git Clone & Git Pull (Cockpit Engine)...")
+        git_remote_dir = os.path.join(tmp_root, "mock_remote_git")
+        os.makedirs(git_remote_dir, exist_ok=True)
+        import subprocess
+        subprocess.run(["git", "init", "-b", "main", git_remote_dir], check=True, capture_output=True)
+        subprocess.run(["git", "-C", git_remote_dir, "config", "user.name", "Tester"], check=True)
+        subprocess.run(["git", "-C", git_remote_dir, "config", "user.email", "test@cockpit.dev"], check=True)
+
+        with open(os.path.join(git_remote_dir, "app.py"), "w") as f:
+            f.write("print('Hello from Git Repo')\n")
+        with open(os.path.join(git_remote_dir, "package.json"), "w") as f:
+            json.dump({"name": "git-app", "dependencies": {"next": "^14.0.0"}}, f)
+
+        subprocess.run(["git", "-C", git_remote_dir, "add", "."], check=True)
+        subprocess.run(["git", "-C", git_remote_dir, "commit", "-m", "Initial commit from remote"], check=True)
+
+        # Mock request to git_clone_workspace
+        flask_mock.request.get_json.return_value = {
+            "repo_url": git_remote_dir,
+            "branch": "main",
+            "name": "cloned_git_project",
+            "description": "Git clone test",
+            "target_agent": "none"
+        }
+        clone_res = cockpit_server.git_clone_workspace()
+        assert clone_res.get("success") is True, f"Clone failed: {clone_res}"
+        ws_obj = clone_res.get("workspace")
+        assert ws_obj["source"] == "git"
+        assert ws_obj["git_branch"] == "main"
+        assert len(ws_obj["git_commit"]) > 0
+        assert "Initial commit" in ws_obj["git_commit_msg"]
+        assert "Next.js" in ws_obj["primary_language"]
+        cloned_ws_id = ws_obj["id"]
+
+        # Now simulate a commit in the remote and test git_pull_workspace
+        with open(os.path.join(git_remote_dir, "extra_feature.js"), "w") as f:
+            f.write("// new feature added\n")
+        subprocess.run(["git", "-C", git_remote_dir, "add", "."], check=True)
+        subprocess.run(["git", "-C", git_remote_dir, "commit", "-m", "Add extra feature"], check=True)
+
+        flask_mock.request.get_json.return_value = {"auto_redeploy": False}
+        pull_res = cockpit_server.git_pull_workspace(cloned_ws_id)
+        assert pull_res.get("success") is True, f"Pull failed: {pull_res}"
+        updated_ws = pull_res.get("workspace")
+        assert updated_ws["file_count"] == 3
+        assert "Add extra feature" in updated_ws["git_commit_msg"]
+        print("  -> Passed!")
+
+        # ----------------------------------------------------
+        # 10. Test Agent Bridge Direct Git Clone & Pull
+        # ----------------------------------------------------
+        print("\n[TEST 10] Agent Bridge Direct Git Clone & Git Pull...")
+        flask_mock.request.get_json.return_value = {
+            "repo_url": git_remote_dir,
+            "branch": "main",
+            "workspace_name": "agent_git_direct",
+            "workspace_id": "ws_agent_git_1",
+            "clean_first": True
+        }
+        agent_clone_res = agent_bridge.workspace_git_clone()
+        assert agent_clone_res.get("success") is True, f"Agent git clone failed: {agent_clone_res}"
+        assert os.path.exists(os.path.join(agent_home_ws, "app.py"))
+        assert os.path.exists(os.path.join(agent_home_ws, ".cockpit_workspace.json"))
+
+        agent_pull_res = agent_bridge.workspace_git_pull()
+        assert agent_pull_res.get("success") is True, f"Agent git pull failed: {agent_pull_res}"
+        print("  -> Passed!")
+
+        print("\n>>> ALL 10 WORKSPACE SUITE TESTS PASSED PERFECTLY! <<<")
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 

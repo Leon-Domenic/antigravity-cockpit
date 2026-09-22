@@ -238,6 +238,53 @@ def load_workspaces():
     save_workspaces()
     return WORKSPACES
 
+def normalize_git_url(raw_url, token=None):
+    url = (raw_url or "").strip()
+    extracted_branch = None
+
+    if "#" in url:
+        url, extracted_branch = url.split("#", 1)
+        url = url.strip()
+        extracted_branch = extracted_branch.strip()
+    elif "@" in url and not url.startswith("git@") and not ("http://" in url or "https://" in url):
+        parts = url.split("@", 1)
+        url = parts[0].strip()
+        extracted_branch = parts[1].strip()
+
+    if not (url.startswith("http://") or url.startswith("https://") or url.startswith("git@") or url.startswith("ssh://")):
+        parts = url.split("/")
+        if len(parts) == 2 and "." not in parts[0]:
+            url = f"https://github.com/{parts[0]}/{parts[1]}.git"
+        elif len(parts) >= 2 and ("github.com" in parts[0] or "gitlab.com" in parts[0] or "bitbucket.org" in parts[0]):
+            url = f"https://{url}"
+
+    if url.startswith("http://") or url.startswith("https://"):
+        if not url.endswith(".git") and not url.endswith("/"):
+            url = url + ".git"
+
+    safe_url = url
+    clone_url = url
+
+    if token and token.strip():
+        tok = token.strip()
+        if "github.com" in url:
+            clean = re.sub(r'https?://([^@]+@)?github\.com/', '', url)
+            clone_url = f"https://{tok}@github.com/{clean}"
+            safe_url = f"https://github.com/{clean}"
+        elif "gitlab.com" in url:
+            clean = re.sub(r'https?://([^@]+@)?gitlab\.com/', '', url)
+            clone_url = f"https://oauth2:{tok}@gitlab.com/{clean}"
+            safe_url = f"https://gitlab.com/{clean}"
+        elif url.startswith("https://"):
+            match = re.match(r'https://([^/]+)/(.*)', url)
+            if match:
+                host, path = match.group(1), match.group(2)
+                host_clean = host.split("@")[-1]
+                clone_url = f"https://{tok}@{host_clean}/{path}"
+                safe_url = f"https://{host_clean}/{path}"
+
+    return clone_url, safe_url, extracted_branch
+
 def build_workspace_tree(ws_path, current_rel="", max_depth=4, current_depth=0):
     if current_depth > max_depth:
         return []
@@ -1351,8 +1398,14 @@ HTML_TEMPLATE = """
                     <span><i class="fa-solid fa-bolt text-purple-400 mr-1"></i> Deployed: <span id="ws-stats-deployments" class="text-emerald-400 font-bold">0 Agents</span></span>
                 </div>
                 <div class="flex items-center gap-2">
-                    <button onclick="switchWorkspacesTab('import')" id="btn-quick-import" class="px-3.5 py-1 btn-action-primary rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-lg transition">
-                        <i class="fa-solid fa-plus text-emerald-300"></i> Import Project
+                    <button onclick="switchWorkspacesTab('git')" id="btn-quick-git" class="px-3.5 py-1 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition text-sky-300 border border-sky-500/30 hover:bg-sky-500/10 shadow">
+                        <i class="fa-brands fa-git-alt"></i> Git Import
+                    </button>
+                    <button onclick="switchWorkspacesTab('upload')" id="btn-quick-upload" class="px-3.5 py-1 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition text-amber-300 border border-amber-500/30 hover:bg-amber-500/10 shadow">
+                        <i class="fa-solid fa-cloud-arrow-up"></i> Upload ZIP
+                    </button>
+                    <button onclick="switchWorkspacesTab('templates')" id="btn-quick-templates" class="px-3.5 py-1 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition text-purple-300 border border-purple-500/30 hover:bg-purple-500/10 shadow">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> Templates
                     </button>
                 </div>
             </div>
@@ -1362,11 +1415,17 @@ HTML_TEMPLATE = """
                 <button onclick="switchWorkspacesTab('library')" id="ws-tab-btn-library" class="px-4 py-2 border-b-2 text-xs font-bold transition flex items-center gap-2" style="border-color: var(--accent-primary); color: var(--highlight-text);">
                     <i class="fa-solid fa-boxes-stacked"></i> Projects Library (<span id="ws-tab-count">0</span>)
                 </button>
-                <button onclick="switchWorkspacesTab('import')" id="ws-tab-btn-import" class="px-4 py-2 border-b-2 border-transparent text-xs font-bold transition text-slate-400 hover:text-white flex items-center gap-2">
-                    <i class="fa-solid fa-cloud-arrow-up"></i> Import Project
+                <button onclick="switchWorkspacesTab('git')" id="ws-tab-btn-git" class="px-4 py-2 border-b-2 border-transparent text-xs font-bold transition text-slate-400 hover:text-white flex items-center gap-2">
+                    <i class="fa-brands fa-git-alt text-sky-400"></i> Git Import
+                </button>
+                <button onclick="switchWorkspacesTab('upload')" id="ws-tab-btn-upload" class="px-4 py-2 border-b-2 border-transparent text-xs font-bold transition text-slate-400 hover:text-white flex items-center gap-2">
+                    <i class="fa-solid fa-cloud-arrow-up text-amber-400"></i> Upload Archive
+                </button>
+                <button onclick="switchWorkspacesTab('templates')" id="ws-tab-btn-templates" class="px-4 py-2 border-b-2 border-transparent text-xs font-bold transition text-slate-400 hover:text-white flex items-center gap-2">
+                    <i class="fa-solid fa-wand-magic-sparkles text-purple-400"></i> Starter Templates
                 </button>
                 <button onclick="switchWorkspacesTab('matrix')" id="ws-tab-btn-matrix" class="px-4 py-2 border-b-2 border-transparent text-xs font-bold transition text-slate-400 hover:text-white flex items-center gap-2">
-                    <i class="fa-solid fa-network-wired"></i> Agent Mount Matrix
+                    <i class="fa-solid fa-network-wired text-emerald-400"></i> Agent Mount Matrix
                 </button>
             </div>
 
@@ -1377,6 +1436,14 @@ HTML_TEMPLATE = """
                         <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
                         <input id="ws-search-input" oninput="filterWorkspacesDisplay()" type="text" placeholder="Search imported projects by name, language, or stack (e.g. react, python, next, api)..." class="w-full input-box rounded-xl pl-9 pr-4 py-2 text-xs focus:outline-none focus:border-slate-400">
                     </div>
+                    <div class="flex items-center gap-2">
+                        <button onclick="switchWorkspacesTab('git')" class="px-3 py-2 rounded-xl border text-xs font-semibold text-sky-400 hover:text-white hover:bg-sky-500/10 transition flex items-center gap-1.5" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <i class="fa-brands fa-git-alt"></i> Import from Git
+                        </button>
+                        <button onclick="switchWorkspacesTab('upload')" class="px-3 py-2 rounded-xl border text-xs font-semibold text-amber-400 hover:text-white hover:bg-amber-500/10 transition flex items-center gap-1.5" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <i class="fa-solid fa-file-zipper"></i> Upload ZIP
+                        </button>
+                    </div>
                 </div>
 
                 <!-- Projects Cards Grid -->
@@ -1385,143 +1452,265 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- Tab 2: Import Project Content -->
-            <div id="ws-tab-import" class="flex-1 overflow-y-auto p-6 space-y-5 scrollbar-thin hidden">
-                <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+            <!-- Tab 2: Dedicated Git Import Content -->
+            <div id="ws-tab-git" class="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin hidden">
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
                     
-                    <!-- Method 1: Upload Archive -->
-                    <div class="glass p-5 rounded-2xl border space-y-4 flex flex-col justify-between" style="background-color: var(--bg-input); border-color: var(--border-base);">
-                        <div class="space-y-3">
-                            <div class="flex items-center gap-2.5 text-white font-bold text-sm">
-                                <div class="w-8 h-8 rounded-lg flex items-center justify-center text-amber-400 bg-amber-500/10 border border-amber-500/30">
-                                    <i class="fa-solid fa-file-zipper"></i>
+                    <!-- Left 7 cols: Git Clone Form -->
+                    <div class="lg:col-span-7 space-y-4">
+                        <div class="glass p-5 rounded-2xl border space-y-4" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <div class="flex items-center justify-between">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-xl flex items-center justify-center text-sky-400 bg-sky-500/10 border border-sky-500/30 text-xl shadow-inner">
+                                        <i class="fa-brands fa-git-alt"></i>
+                                    </div>
+                                    <div>
+                                        <h3 class="text-sm font-bold text-white">Import from Git Repository</h3>
+                                        <p class="text-xs text-slate-400">Clone and ingest any repository from GitHub, GitLab, Bitbucket, or private Git servers</p>
+                                    </div>
                                 </div>
-                                <span>Upload Project Archive</span>
-                            </div>
-                            <p class="text-xs text-slate-400">Upload a <code>.zip</code>, <code>.tar.gz</code>, or <code>.tar</code> bundle from your computer. Cockpit unzips it directly into workspace storage.</p>
-                            
-                            <!-- Drag & Drop Zone -->
-                            <div id="ws-drop-zone" onclick="document.getElementById('ws-archive-file-input').click()" class="border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition hover:border-emerald-400" style="border-color: var(--border-base); background-color: var(--bg-base);">
-                                <input type="file" id="ws-archive-file-input" accept=".zip,.tar,.gz,.tgz" class="hidden" onchange="handleWsFileSelect(this.files)">
-                                <i class="fa-solid fa-cloud-arrow-up text-2xl text-slate-400 mb-2"></i>
-                                <div class="text-xs font-semibold text-slate-200" id="ws-dropzone-label">Drop ZIP or Tar file here, or click to browse</div>
-                                <div class="text-[10px] text-slate-500 mt-1">Supports GitHub ZIP exports & local bundles</div>
+                                <span class="px-2.5 py-0.5 rounded-full text-[10px] font-mono border bg-sky-500/10 text-sky-400 border-sky-500/30 font-bold">git clone --depth 1</span>
                             </div>
 
-                            <div class="space-y-2 pt-1">
-                                <input id="ws-upload-name-input" type="text" placeholder="Project Name (optional, defaults to file name)" class="w-full input-box rounded-xl px-3 py-2 text-xs">
-                                <input id="ws-upload-desc-input" type="text" placeholder="Short description (e.g. Next.js storefront)" class="w-full input-box rounded-xl px-3 py-2 text-xs">
-                                <div class="flex items-center gap-2 text-xs text-slate-300 pt-1">
-                                    <input type="checkbox" id="ws-upload-auto-deploy" checked class="w-4 h-4 rounded text-emerald-500">
-                                    <label for="ws-upload-auto-deploy" class="cursor-pointer">Pass directly to target agent after import</label>
+                            <div class="space-y-3.5 pt-2">
+                                <!-- Repo URL -->
+                                <div>
+                                    <div class="flex justify-between items-center mb-1">
+                                        <label class="text-[10px] uppercase font-bold text-slate-300">Repository URL or Shorthand *</label>
+                                        <span class="text-[10px] text-sky-400 font-mono">e.g. owner/repo or full HTTPS</span>
+                                    </div>
+                                    <div class="relative">
+                                        <i class="fa-brands fa-github absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-sm"></i>
+                                        <input id="ws-git-url-input" type="text" placeholder="https://github.com/username/repository or owner/repo (e.g. facebook/react)" class="w-full input-box rounded-xl pl-9 pr-4 py-2.5 text-xs font-mono text-white focus:border-sky-400 focus:outline-none">
+                                    </div>
+                                </div>
+
+                                <!-- Branch & Token Row -->
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div>
+                                        <label class="block text-[10px] uppercase font-bold text-slate-300 mb-1">Branch (Optional)</label>
+                                        <div class="relative">
+                                            <i class="fa-solid fa-code-branch absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                            <input id="ws-git-branch-input" type="text" placeholder="main (default)" class="w-full input-box rounded-xl pl-9 pr-3 py-2 text-xs font-mono text-white focus:border-sky-400 focus:outline-none">
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <div class="flex justify-between items-center mb-1">
+                                            <label class="text-[10px] uppercase font-bold text-slate-300">Personal Access Token</label>
+                                            <span class="text-[10px] text-slate-500">Private repos</span>
+                                        </div>
+                                        <div class="relative">
+                                            <i class="fa-solid fa-key absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                            <input id="ws-git-token-input" type="password" placeholder="ghp_xxxxxxxxxxxx" class="w-full input-box rounded-xl pl-9 pr-9 py-2 text-xs font-mono text-white focus:border-sky-400 focus:outline-none">
+                                            <button type="button" onclick="toggleGitTokenVisibility()" class="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition">
+                                                <i id="ws-git-token-eye" class="fa-solid fa-eye text-xs"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Project Name & Description -->
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div>
+                                        <label class="block text-[10px] uppercase font-bold text-slate-300 mb-1">Project Name (Optional)</label>
+                                        <input id="ws-git-name-input" type="text" placeholder="Defaults to repository name" class="w-full input-box rounded-xl px-3 py-2 text-xs text-white focus:border-sky-400 focus:outline-none">
+                                    </div>
+                                    <div>
+                                        <label class="block text-[10px] uppercase font-bold text-slate-300 mb-1">Description</label>
+                                        <input id="ws-git-desc-input" type="text" placeholder="Short description" class="w-full input-box rounded-xl px-3 py-2 text-xs text-white focus:border-sky-400 focus:outline-none">
+                                    </div>
+                                </div>
+
+                                <!-- Target Agent & Auto Deploy -->
+                                <div class="p-3 rounded-xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3" style="background-color: var(--bg-base); border-color: var(--border-base);">
+                                    <div class="flex items-center gap-2">
+                                        <input type="checkbox" id="ws-git-auto-deploy" checked class="w-4 h-4 rounded text-sky-500">
+                                        <label for="ws-git-auto-deploy" class="text-xs text-slate-200 cursor-pointer font-medium">Mount to agent immediately after clone</label>
+                                    </div>
+                                    <div class="flex items-center gap-2 w-full sm:w-auto">
+                                        <span class="text-[11px] text-slate-400 font-semibold">Agent:</span>
+                                        <select id="ws-git-target-agent-select" class="input-box rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none cursor-pointer">
+                                            <option value="agent-1">Agent 1</option>
+                                            <option value="agent-2">Agent 2</option>
+                                            <option value="agent-3">Agent 3</option>
+                                            <option value="agent-4">Agent 4</option>
+                                            <option value="agent-5">Agent 5</option>
+                                            <option value="broadcast">⚡ All Active Agents</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <button onclick="submitGitClone()" id="btn-submit-ws-clone" class="w-full py-3 btn-action-primary font-bold rounded-xl text-xs transition shadow-xl flex items-center justify-center gap-2 tracking-wide">
+                                <i class="fa-brands fa-git-alt text-base"></i> Clone Repository & Ingest Workspace
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Right 5 cols: Presets & Guides -->
+                    <div class="lg:col-span-5 space-y-4">
+                        <!-- 1-Click Popular Starters -->
+                        <div class="glass p-5 rounded-2xl border space-y-3.5" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <div class="flex items-center justify-between">
+                                <h4 class="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                                    <i class="fa-solid fa-fire text-amber-400"></i> Popular Starters & Demos
+                                </h4>
+                                <span class="text-[10px] text-slate-400">1-click fill</span>
+                            </div>
+                            <div class="space-y-2">
+                                <div onclick="applyGitPreset('https://github.com/vercel/next-learn', 'main', 'nextjs_demo', 'Next.js Official Learn & Demo App')" class="p-2.5 rounded-xl border cursor-pointer hover:border-sky-400 transition flex items-center justify-between group" style="background-color: var(--bg-base); border-color: var(--border-base);">
+                                    <div class="flex items-center gap-2.5 min-w-0">
+                                        <i class="fa-solid fa-n text-white text-base"></i>
+                                        <div class="min-w-0">
+                                            <div class="text-xs font-bold text-white group-hover:text-sky-400 transition">Next.js App Router Demo</div>
+                                            <div class="text-[10px] text-slate-400 font-mono truncate">vercel/next-learn</div>
+                                        </div>
+                                    </div>
+                                    <i class="fa-solid fa-arrow-turn-down text-slate-500 group-hover:text-sky-400 text-xs"></i>
+                                </div>
+
+                                <div onclick="applyGitPreset('https://github.com/vitejs/vite', 'main', 'vite_core', 'Vite Next Generation Frontend Tooling')" class="p-2.5 rounded-xl border cursor-pointer hover:border-purple-400 transition flex items-center justify-between group" style="background-color: var(--bg-base); border-color: var(--border-base);">
+                                    <div class="flex items-center gap-2.5 min-w-0">
+                                        <i class="fa-solid fa-bolt text-purple-400 text-base"></i>
+                                        <div class="min-w-0">
+                                            <div class="text-xs font-bold text-white group-hover:text-purple-400 transition">Vite Frontend Project</div>
+                                            <div class="text-[10px] text-slate-400 font-mono truncate">vitejs/vite</div>
+                                        </div>
+                                    </div>
+                                    <i class="fa-solid fa-arrow-turn-down text-slate-500 group-hover:text-purple-400 text-xs"></i>
+                                </div>
+
+                                <div onclick="applyGitPreset('https://github.com/tiangolo/full-stack-fastapi-template', 'master', 'fastapi_template', 'FastAPI Full Stack Project Template')" class="p-2.5 rounded-xl border cursor-pointer hover:border-teal-400 transition flex items-center justify-between group" style="background-color: var(--bg-base); border-color: var(--border-base);">
+                                    <div class="flex items-center gap-2.5 min-w-0">
+                                        <i class="fa-brands fa-python text-teal-400 text-base"></i>
+                                        <div class="min-w-0">
+                                            <div class="text-xs font-bold text-white group-hover:text-teal-400 transition">FastAPI Python Template</div>
+                                            <div class="text-[10px] text-slate-400 font-mono truncate">tiangolo/full-stack-fastapi-template</div>
+                                        </div>
+                                    </div>
+                                    <i class="fa-solid fa-arrow-turn-down text-slate-500 group-hover:text-teal-400 text-xs"></i>
+                                </div>
+
+                                <div onclick="applyGitPreset('https://github.com/expressjs/express', 'master', 'express_api', 'Express.js Fast, unopinionated minimalist web framework')" class="p-2.5 rounded-xl border cursor-pointer hover:border-emerald-400 transition flex items-center justify-between group" style="background-color: var(--bg-base); border-color: var(--border-base);">
+                                    <div class="flex items-center gap-2.5 min-w-0">
+                                        <i class="fa-brands fa-node-js text-emerald-400 text-base"></i>
+                                        <div class="min-w-0">
+                                            <div class="text-xs font-bold text-white group-hover:text-emerald-400 transition">Express.js API Framework</div>
+                                            <div class="text-[10px] text-slate-400 font-mono truncate">expressjs/express</div>
+                                        </div>
+                                    </div>
+                                    <i class="fa-solid fa-arrow-turn-down text-slate-500 group-hover:text-emerald-400 text-xs"></i>
                                 </div>
                             </div>
                         </div>
 
-                        <button onclick="submitWorkspaceArchiveUpload()" id="btn-submit-ws-upload" class="w-full py-2.5 btn-action-primary font-semibold rounded-xl text-xs transition shadow-lg flex items-center justify-center gap-2">
-                            <i class="fa-solid fa-upload"></i> Import & Unpack Archive
-                        </button>
-                    </div>
-
-                    <!-- Method 2: Git Clone -->
-                    <div class="glass p-5 rounded-2xl border space-y-4 flex flex-col justify-between" style="background-color: var(--bg-input); border-color: var(--border-base);">
-                        <div class="space-y-3">
-                            <div class="flex items-center gap-2.5 text-white font-bold text-sm">
-                                <div class="w-8 h-8 rounded-lg flex items-center justify-center text-sky-400 bg-sky-500/10 border border-sky-500/30">
-                                    <i class="fa-brands fa-git-alt"></i>
-                                </div>
-                                <span>Clone Git Repository</span>
-                            </div>
-                            <p class="text-xs text-slate-400">Clone a public or HTTPS git repository directly into Cockpit workspace storage using <code>git clone --depth 1</code>.</p>
-
-                            <div class="space-y-2.5 pt-1">
-                                <div>
-                                    <label class="block text-[10px] uppercase font-bold text-slate-400 mb-1">Repository URL *</label>
-                                    <input id="ws-git-url-input" type="text" placeholder="https://github.com/username/repository.git" class="w-full input-box rounded-xl px-3 py-2 text-xs font-mono text-white">
-                                </div>
-                                <div>
-                                    <label class="block text-[10px] uppercase font-bold text-slate-400 mb-1">Branch (Optional)</label>
-                                    <input id="ws-git-branch-input" type="text" placeholder="main (or master)" class="w-full input-box rounded-xl px-3 py-2 text-xs font-mono text-white">
-                                </div>
-                                <div>
-                                    <label class="block text-[10px] uppercase font-bold text-slate-400 mb-1">Project Name (Optional)</label>
-                                    <input id="ws-git-name-input" type="text" placeholder="Defaults to repo name" class="w-full input-box rounded-xl px-3 py-2 text-xs text-white">
-                                </div>
-                                <div>
-                                    <label class="block text-[10px] uppercase font-bold text-slate-400 mb-1">Description</label>
-                                    <input id="ws-git-desc-input" type="text" placeholder="Short description" class="w-full input-box rounded-xl px-3 py-2 text-xs text-white">
-                                </div>
-                                <div class="flex items-center gap-2 text-xs text-slate-300 pt-1">
-                                    <input type="checkbox" id="ws-git-auto-deploy" checked class="w-4 h-4 rounded text-emerald-500">
-                                    <label for="ws-git-auto-deploy" class="cursor-pointer">Pass directly to target agent after clone</label>
-                                </div>
-                            </div>
-                        </div>
-
-                        <button onclick="submitGitClone()" id="btn-submit-ws-clone" class="w-full py-2.5 btn-action-primary font-semibold rounded-xl text-xs transition shadow-lg flex items-center justify-center gap-2">
-                            <i class="fa-solid fa-code-pull-request"></i> Clone Repository
-                        </button>
-                    </div>
-
-                    <!-- Method 3: Starter Templates -->
-                    <div class="glass p-5 rounded-2xl border space-y-4 flex flex-col justify-between" style="background-color: var(--bg-input); border-color: var(--border-base);">
-                        <div class="space-y-3">
-                            <div class="flex items-center gap-2.5 text-white font-bold text-sm">
-                                <div class="w-8 h-8 rounded-lg flex items-center justify-center text-purple-400 bg-purple-500/10 border border-purple-500/30">
-                                    <i class="fa-solid fa-wand-magic-sparkles"></i>
-                                </div>
-                                <span>Create from Starter Template</span>
-                            </div>
-                            <p class="text-xs text-slate-400">Initialize a clean, structured project ready for autonomous agent development.</p>
-
-                            <div class="space-y-2 pt-1">
-                                <div onclick="createWorkspaceTemplate('react')" class="p-2.5 rounded-xl border cursor-pointer transition hover:border-cyan-400 flex items-center justify-between" style="background-color: var(--bg-base); border-color: var(--border-base);">
-                                    <div class="flex items-center gap-2.5">
-                                        <i class="fa-brands fa-react text-cyan-400 text-lg"></i>
-                                        <div>
-                                            <div class="text-xs font-bold text-white">React + Vite + TypeScript</div>
-                                            <div class="text-[10px] text-slate-400">Modern frontend with Vitest</div>
-                                        </div>
-                                    </div>
-                                    <i class="fa-solid fa-plus text-slate-400 text-xs"></i>
-                                </div>
-
-                                <div onclick="createWorkspaceTemplate('node')" class="p-2.5 rounded-xl border cursor-pointer transition hover:border-emerald-400 flex items-center justify-between" style="background-color: var(--bg-base); border-color: var(--border-base);">
-                                    <div class="flex items-center gap-2.5">
-                                        <i class="fa-brands fa-node-js text-emerald-400 text-lg"></i>
-                                        <div>
-                                            <div class="text-xs font-bold text-white">Node.js + Express API</div>
-                                            <div class="text-[10px] text-slate-400">REST API with watch reload</div>
-                                        </div>
-                                    </div>
-                                    <i class="fa-solid fa-plus text-slate-400 text-xs"></i>
-                                </div>
-
-                                <div onclick="createWorkspaceTemplate('python')" class="p-2.5 rounded-xl border cursor-pointer transition hover:border-amber-400 flex items-center justify-between" style="background-color: var(--bg-base); border-color: var(--border-base);">
-                                    <div class="flex items-center gap-2.5">
-                                        <i class="fa-brands fa-python text-amber-400 text-lg"></i>
-                                        <div>
-                                            <div class="text-xs font-bold text-white">Python Flask Service</div>
-                                            <div class="text-[10px] text-slate-400">Lightweight backend with pytest</div>
-                                        </div>
-                                    </div>
-                                    <i class="fa-solid fa-plus text-slate-400 text-xs"></i>
-                                </div>
-
-                                <div onclick="createWorkspaceTemplate('blank')" class="p-2.5 rounded-xl border cursor-pointer transition hover:border-slate-300 flex items-center justify-between" style="background-color: var(--bg-base); border-color: var(--border-base);">
-                                    <div class="flex items-center gap-2.5">
-                                        <i class="fa-solid fa-file-lines text-slate-300 text-lg"></i>
-                                        <div>
-                                            <div class="text-xs font-bold text-white">Clean Blank Workspace</div>
-                                            <div class="text-[10px] text-slate-400">Empty directory with .gitignore & README</div>
-                                        </div>
-                                    </div>
-                                    <i class="fa-solid fa-plus text-slate-400 text-xs"></i>
-                                </div>
-                            </div>
+                        <!-- Git Capabilities Summary Card -->
+                        <div class="glass p-4 rounded-2xl border space-y-2 text-xs" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <span class="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
+                                <i class="fa-solid fa-circle-check text-sky-400"></i> Git Engine Highlights
+                            </span>
+                            <ul class="space-y-1.5 text-[11px] text-slate-300">
+                                <li class="flex items-center gap-2"><i class="fa-solid fa-check text-emerald-400 text-[10px]"></i> Shallow clone (<code>--depth 1</code>) for blazing speed</li>
+                                <li class="flex items-center gap-2"><i class="fa-solid fa-check text-emerald-400 text-[10px]"></i> Shorthand <code>org/repo</code> expanded automatically</li>
+                                <li class="flex items-center gap-2"><i class="fa-solid fa-check text-emerald-400 text-[10px]"></i> Token masked and never logged</li>
+                                <li class="flex items-center gap-2"><i class="fa-solid fa-check text-emerald-400 text-[10px]"></i> 1-click <code>Git Pull</code> sync directly from project cards</li>
+                            </ul>
                         </div>
                     </div>
 
+                </div>
+            </div>
+
+            <!-- Tab 3: Upload Archive Content -->
+            <div id="ws-tab-upload" class="flex-1 overflow-y-auto p-6 space-y-5 scrollbar-thin hidden">
+                <div class="max-w-2xl mx-auto glass p-6 rounded-2xl border space-y-4" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    <div class="flex items-center gap-3 text-white font-bold text-sm">
+                        <div class="w-10 h-10 rounded-xl flex items-center justify-center text-amber-400 bg-amber-500/10 border border-amber-500/30 text-lg">
+                            <i class="fa-solid fa-file-zipper"></i>
+                        </div>
+                        <div>
+                            <h3 class="text-sm font-bold text-white">Upload Project Archive</h3>
+                            <p class="text-xs text-slate-400">Upload a <code>.zip</code>, <code>.tar.gz</code>, or <code>.tar</code> bundle from your computer</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Drag & Drop Zone -->
+                    <div id="ws-drop-zone" onclick="document.getElementById('ws-archive-file-input').click()" class="border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition hover:border-emerald-400" style="border-color: var(--border-base); background-color: var(--bg-base);">
+                        <input type="file" id="ws-archive-file-input" accept=".zip,.tar,.gz,.tgz" class="hidden" onchange="handleWsFileSelect(this.files)">
+                        <i class="fa-solid fa-cloud-arrow-up text-3xl text-slate-400 mb-2"></i>
+                        <div class="text-xs font-semibold text-slate-200" id="ws-dropzone-label">Drop ZIP or Tar file here, or click to browse</div>
+                        <div class="text-[10px] text-slate-500 mt-1">Supports GitHub ZIP exports & local bundles (auto-flattens root folder)</div>
+                    </div>
+
+                    <div class="space-y-2.5 pt-1">
+                        <input id="ws-upload-name-input" type="text" placeholder="Project Name (optional, defaults to file name)" class="w-full input-box rounded-xl px-3 py-2 text-xs text-white">
+                        <input id="ws-upload-desc-input" type="text" placeholder="Short description (e.g. Next.js storefront)" class="w-full input-box rounded-xl px-3 py-2 text-xs text-white">
+                        <div class="flex items-center gap-2 text-xs text-slate-300 pt-1">
+                            <input type="checkbox" id="ws-upload-auto-deploy" checked class="w-4 h-4 rounded text-emerald-500">
+                            <label for="ws-upload-auto-deploy" class="cursor-pointer">Pass directly to target agent after import</label>
+                        </div>
+                    </div>
+
+                    <button onclick="submitWorkspaceArchiveUpload()" id="btn-submit-ws-upload" class="w-full py-3 btn-action-primary font-bold rounded-xl text-xs transition shadow-lg flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-upload"></i> Import & Unpack Archive
+                    </button>
+                </div>
+            </div>
+
+            <!-- Tab 4: Starter Templates Content -->
+            <div id="ws-tab-templates" class="flex-1 overflow-y-auto p-6 space-y-5 scrollbar-thin hidden">
+                <div class="max-w-4xl mx-auto space-y-4">
+                    <div class="text-center space-y-1">
+                        <h3 class="text-base font-bold text-white">Initialize Starter Template</h3>
+                        <p class="text-xs text-slate-400">Scaffold a structured starter project ready for immediate agent coding and execution.</p>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                        <div onclick="createWorkspaceTemplate('react')" class="glass p-5 rounded-2xl border cursor-pointer transition hover:border-cyan-400 hover:bg-cyan-500/5 group" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <div class="flex items-start justify-between">
+                                <div class="w-10 h-10 rounded-xl flex items-center justify-center text-cyan-400 bg-cyan-500/10 border border-cyan-500/30 text-xl">
+                                    <i class="fa-brands fa-react"></i>
+                                </div>
+                                <span class="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border bg-cyan-500/10 text-cyan-400 border-cyan-500/30">Vite + TS</span>
+                            </div>
+                            <h4 class="text-sm font-bold text-white mt-3 group-hover:text-cyan-400 transition">React + Vite + TypeScript</h4>
+                            <p class="text-xs text-slate-400 mt-1">Preconfigured modern React app with Vitest test runner, Tailwind support, and TypeScript.</p>
+                        </div>
+
+                        <div onclick="createWorkspaceTemplate('node')" class="glass p-5 rounded-2xl border cursor-pointer transition hover:border-emerald-400 hover:bg-emerald-500/5 group" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <div class="flex items-start justify-between">
+                                <div class="w-10 h-10 rounded-xl flex items-center justify-center text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 text-xl">
+                                    <i class="fa-brands fa-node-js"></i>
+                                </div>
+                                <span class="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border bg-emerald-500/10 text-emerald-400 border-emerald-500/30">Node.js</span>
+                            </div>
+                            <h4 class="text-sm font-bold text-white mt-3 group-hover:text-emerald-400 transition">Node.js + Express API</h4>
+                            <p class="text-xs text-slate-400 mt-1">Lightweight REST API service with JSON routing, CORS headers, and NPM start script.</p>
+                        </div>
+
+                        <div onclick="createWorkspaceTemplate('python')" class="glass p-5 rounded-2xl border cursor-pointer transition hover:border-amber-400 hover:bg-amber-500/5 group" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <div class="flex items-start justify-between">
+                                <div class="w-10 h-10 rounded-xl flex items-center justify-center text-amber-400 bg-amber-500/10 border border-amber-500/30 text-xl">
+                                    <i class="fa-brands fa-python"></i>
+                                </div>
+                                <span class="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border bg-amber-500/10 text-amber-400 border-amber-500/30">Python 3</span>
+                            </div>
+                            <h4 class="text-sm font-bold text-white mt-3 group-hover:text-amber-400 transition">Python Flask Service</h4>
+                            <p class="text-xs text-slate-400 mt-1">Clean microservice backend with `app.py`, `requirements.txt`, and pytest test suite.</p>
+                        </div>
+
+                        <div onclick="createWorkspaceTemplate('blank')" class="glass p-5 rounded-2xl border cursor-pointer transition hover:border-slate-300 hover:bg-white/5 group" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <div class="flex items-start justify-between">
+                                <div class="w-10 h-10 rounded-xl flex items-center justify-center text-slate-300 bg-slate-500/10 border border-slate-500/30 text-xl">
+                                    <i class="fa-solid fa-file-lines"></i>
+                                </div>
+                                <span class="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border bg-slate-500/10 text-slate-300 border-slate-500/30">Blank</span>
+                            </div>
+                            <h4 class="text-sm font-bold text-white mt-3 group-hover:text-slate-200 transition">Clean Blank Workspace</h4>
+                            <p class="text-xs text-slate-400 mt-1">Empty directory structure with standard `.gitignore` and starter `README.md`.</p>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -1605,6 +1794,10 @@ HTML_TEMPLATE = """
                             <i class="fa-solid fa-bolt"></i> Deploy
                         </button>
                     </div>
+
+                    <button id="explorer-git-pull-btn" onclick="pullGitFromExplorer()" class="px-3 py-1.5 border rounded-xl text-xs font-semibold transition flex items-center gap-1.5 text-sky-300 hover:text-white hover:bg-sky-500/20 hidden" style="background-color: var(--bg-input); border-color: var(--border-base);" title="Pull latest commits from remote Git repository">
+                        <i class="fa-brands fa-git-alt text-sky-400"></i> Git Pull
+                    </button>
 
                     <button onclick="downloadFromExplorer()" class="px-3 py-1.5 border rounded-xl text-xs font-semibold transition flex items-center gap-1.5 text-slate-300 hover:text-white" style="background-color: var(--bg-input); border-color: var(--border-base);" title="Download project ZIP archive">
                         <i class="fa-solid fa-download text-emerald-400"></i> ZIP
@@ -3374,11 +3567,6 @@ Describe the main objective of this capability.
             const standbyList = document.getElementById("standby-agents-list");
             if (!standbyList) return;
 
-            const registeredStopped = agents.filter(a => {
-                const st = fleetStatuses[a.id];
-                return !st || st.power === "stopped" || st.power === "unknown";
-            });
-
             const standardVms = [
                 { vmid: 151, ip: "192.168.178.169" },
                 { vmid: 152, ip: "192.168.178.170" },
@@ -3386,12 +3574,13 @@ Describe the main objective of this capability.
                 { vmid: 154, ip: "192.168.178.172" },
                 { vmid: 155, ip: "192.168.178.173" }
             ];
-            const unregisteredFleet = standardVms.filter(v => !agents.some(a => a.vmid === v.vmid));
 
-            const totalStandby = [
-                ...registeredStopped.map(a => ({ id: a.id, vmid: a.vmid, ip: a.ip, isNew: false })),
-                ...unregisteredFleet.map(u => ({ id: `agent-${u.vmid-150}`, vmid: u.vmid, ip: u.ip, isNew: true }))
-            ];
+            // Only show containers that are NOT already registered (by vmid OR ip)
+            const registeredVmids = new Set(agents.map(a => a.vmid));
+            const registeredIps = new Set(agents.map(a => a.ip));
+            const totalStandby = standardVms
+                .filter(v => !registeredVmids.has(v.vmid) && !registeredIps.has(v.ip))
+                .map(u => ({ id: `agent-${u.vmid-150}`, vmid: u.vmid, ip: u.ip, isNew: true }));
 
             if (totalStandby.length === 0) {
                 standbyList.innerHTML = `
@@ -3446,42 +3635,36 @@ Describe the main objective of this capability.
             document.getElementById("add-agent-modal").classList.add("hidden");
         }
 
+        let _spinUpLock = false;
         async function quickSpinUpStandby(agentId, engineId, name, role, vmid, ip, isNew) {
+            if (_spinUpLock) return;
+            _spinUpLock = true;
+
+            // Disable all spin-up buttons immediately to prevent double-clicks
+            document.querySelectorAll('#standby-agents-list button').forEach(b => {
+                b.disabled = true;
+                b.classList.add('opacity-50', 'cursor-not-allowed');
+                b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Spinning Up...';
+            });
+
             closeAddAgentModal();
+            let newAgentId = agentId;
             try {
-                if (isNew) {
-                    const res = await fetch("/api/agents/add", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            name: name,
-                            role: role,
-                            ip: ip,
-                            vmid: vmid,
-                            type: engineId
-                        })
-                    });
-                    const data = await res.json();
-                    if (data.success) {
-                        agents = data.agents;
-                    }
-                } else {
-                    await fetch("/api/agents/rename", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            agent_id: agentId,
-                            name: name,
-                            role: role,
-                            type: engineId
-                        })
-                    });
-                    const agent = agents.find(a => a.id === agentId);
-                    if (agent) {
-                        agent.name = name;
-                        agent.role = role;
-                        agent.type = engineId;
-                    }
+                const res = await fetch("/api/agents/add", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        name: name,
+                        role: role,
+                        ip: ip,
+                        vmid: vmid,
+                        type: engineId
+                    })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    agents = data.agents;
+                    newAgentId = data.agent.id;  // Use server-assigned ID
                 }
                 buildSidebarDom();
                 buildDedicatedIframes();
@@ -3489,19 +3672,52 @@ Describe the main objective of this capability.
                 buildFleetTableDom();
             } catch (e) {
                 console.error("Config update error", e);
+                _spinUpLock = false;
+                return;
             }
 
-            await toggleAgentPower(agentId, 'start');
-            selectView(agentId);
+            await toggleAgentPower(newAgentId, 'start');
+            selectView(newAgentId);
+
+            // Push engine type to the container once it's online
+            if (engineId !== 'antigravity') {
+                const agent = agents.find(a => a.id === newAgentId);
+                if (agent) {
+                    const pushEngine = async () => {
+                        const bridgeUrl = `http://${agent.ip}:${agent.port || 8000}`;
+                        for (let attempt = 0; attempt < 10; attempt++) {
+                            await new Promise(r => setTimeout(r, 3000));
+                            try {
+                                const res = await fetch(`${bridgeUrl}/configure_engine`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ engine_type: engineId, restart_desktop: true })
+                                });
+                                if (res.ok) {
+                                    console.log(`Engine type '${engineId}' pushed to container ${agent.vmid}`);
+                                    return;
+                                }
+                            } catch (e) {}
+                        }
+                    };
+                    pushEngine();
+                }
+            }
+
+            _spinUpLock = false;
         }
 
+        let _registerLock = false;
         async function registerNewCustomAgent() {
+            if (_registerLock) return;
+            _registerLock = true;
+
             const name = document.getElementById("new-agent-name").value.trim();
             const curEngine = getAgentEngine(selectedAddEngine);
             const role = document.getElementById("new-agent-role").value.trim() || curEngine.defaultRole;
             const ip = document.getElementById("new-agent-ip").value.trim();
 
-            if (!name || !ip) return alert("Please provide Agent Name and IP address");
+            if (!name || !ip) { _registerLock = false; return alert("Please provide Agent Name and IP address"); }
 
             try {
                 const res = await fetch("/api/agents/add", {
@@ -3524,12 +3740,14 @@ Describe the main objective of this capability.
                     closeAddAgentModal();
                     fetchAllStatus();
                     selectView(data.agent.id);
-                    alert(`Agent '${name}' successfully added to Cockpit!`);
+                    if (!data.note) alert(`Agent '${name}' successfully added to Cockpit!`);
                 } else {
                     alert(data.error || "Failed to add agent");
                 }
             } catch (e) {
                 alert("Network error: " + e.message);
+            } finally {
+                _registerLock = false;
             }
         }
 
@@ -3608,8 +3826,9 @@ Describe the main objective of this capability.
         }
 
         function switchWorkspacesTab(tab) {
+            if (tab === "import") tab = "git";
             activeWorkspacesTab = tab;
-            const tabs = ["library", "import", "matrix"];
+            const tabs = ["library", "git", "upload", "templates", "matrix"];
             tabs.forEach(t => {
                 const view = document.getElementById(`ws-tab-${t}`);
                 const btn = document.getElementById(`ws-tab-btn-${t}`);
@@ -3692,18 +3911,19 @@ Describe the main objective of this capability.
         async function submitGitClone() {
             const urlInput = document.getElementById("ws-git-url-input");
             const branchInput = document.getElementById("ws-git-branch-input");
+            const tokenInput = document.getElementById("ws-git-token-input");
             const nameInput = document.getElementById("ws-git-name-input");
             const descInput = document.getElementById("ws-git-desc-input");
-            const autoDeploy = document.getElementById("ws-git-auto-deploy").checked;
-            const targetSelect = document.getElementById("ws-target-agent-select");
+            const autoDeploy = document.getElementById("ws-git-auto-deploy") ? document.getElementById("ws-git-auto-deploy").checked : true;
+            const targetSelect = document.getElementById("ws-git-target-agent-select") || document.getElementById("ws-target-agent-select");
             const targetAgent = autoDeploy ? (targetSelect ? targetSelect.value : "agent-1") : "none";
 
-            const repoUrl = urlInput.value.trim();
-            if (!repoUrl) return alert("Please enter a Git repository URL.");
+            const repoUrl = urlInput ? urlInput.value.trim() : "";
+            if (!repoUrl) return alert("Please enter a Git repository URL or owner/repo shorthand.");
 
             const btn = document.getElementById("btn-submit-ws-clone");
             const origHtml = btn.innerHTML;
-            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Cloning Repository...`;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Cloning & Ingesting Repository...`;
             btn.disabled = true;
 
             try {
@@ -3713,6 +3933,7 @@ Describe the main objective of this capability.
                     body: JSON.stringify({
                         repo_url: repoUrl,
                         branch: branchInput ? branchInput.value.trim() : "",
+                        token: tokenInput ? tokenInput.value.trim() : "",
                         name: nameInput ? nameInput.value.trim() : "",
                         description: descInput ? descInput.value.trim() : "",
                         target_agent: targetAgent
@@ -3722,11 +3943,12 @@ Describe the main objective of this capability.
                 if (data.success) {
                     urlInput.value = "";
                     if (branchInput) branchInput.value = "";
+                    if (tokenInput) tokenInput.value = "";
                     if (nameInput) nameInput.value = "";
                     if (descInput) descInput.value = "";
                     await fetchWorkspaces();
                     switchWorkspacesTab("library");
-                    alert(`Repository '${data.workspace.name}' successfully cloned!${targetAgent !== 'none' ? ' Passed to ' + targetAgent : ''}`);
+                    alert(`Git repository '${data.workspace.name}' successfully cloned!${targetAgent !== 'none' ? ' Mounted to ' + targetAgent : ''}`);
                 } else {
                     alert(data.error || "Git clone failed");
                 }
@@ -3735,6 +3957,62 @@ Describe the main objective of this capability.
             } finally {
                 btn.innerHTML = origHtml;
                 btn.disabled = false;
+            }
+        }
+
+        function applyGitPreset(url, branch, name, desc) {
+            const urlInput = document.getElementById("ws-git-url-input");
+            const branchInput = document.getElementById("ws-git-branch-input");
+            const nameInput = document.getElementById("ws-git-name-input");
+            const descInput = document.getElementById("ws-git-desc-input");
+            if (urlInput) urlInput.value = url;
+            if (branchInput) branchInput.value = branch || "main";
+            if (nameInput) nameInput.value = name;
+            if (descInput) descInput.value = desc;
+        }
+
+        function toggleGitTokenVisibility() {
+            const input = document.getElementById("ws-git-token-input");
+            const icon = document.getElementById("ws-git-token-eye");
+            if (!input) return;
+            if (input.type === "password") {
+                input.type = "text";
+                if (icon) icon.className = "fa-solid fa-eye-slash text-sky-400";
+            } else {
+                input.type = "password";
+                if (icon) icon.className = "fa-solid fa-eye text-slate-400";
+            }
+        }
+
+        async function pullWorkspaceGit(wsId) {
+            const btn = document.getElementById(`btn-gitpull-${wsId}`);
+            let origHtml = "";
+            if (btn) {
+                origHtml = btn.innerHTML;
+                btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i>`;
+                btn.disabled = true;
+            }
+
+            try {
+                const res = await fetch(`/api/workspaces/${wsId}/git_pull`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ auto_redeploy: true })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    await fetchWorkspaces();
+                    alert(`Git repository '${data.workspace.name}' successfully pulled and updated!${data.redeploy ? '\nAuto-redeployed to mounted agents.' : ''}`);
+                } else {
+                    alert(data.error || "Git pull failed");
+                }
+            } catch (e) {
+                alert("Git pull error: " + e.message);
+            } finally {
+                if (btn) {
+                    btn.innerHTML = origHtml;
+                    btn.disabled = false;
+                }
             }
         }
 
@@ -3834,19 +4112,25 @@ Describe the main objective of this capability.
                                         <span class="text-[10px] font-mono text-slate-400">${escapeHtml(w.primary_language || 'Generic')}</span>
                                     </div>
                                 </div>
-                                <span class="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold uppercase border flex-shrink-0" style="background: var(--badge-bg); color: var(--badge-text); border-color: var(--border-base);">
-                                    ${w.source || 'upload'}
-                                </span>
+                                ${w.source === 'git' || w.git_url ? `
+                                    <span class="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold uppercase border bg-sky-500/10 text-sky-400 border-sky-500/30 flex items-center gap-1 flex-shrink-0">
+                                        <i class="fa-brands fa-git-alt"></i> Git
+                                    </span>
+                                ` : `
+                                    <span class="px-2 py-0.5 rounded-full text-[9px] font-mono font-bold uppercase border flex-shrink-0" style="background: var(--badge-bg); color: var(--badge-text); border-color: var(--border-base);">
+                                        ${w.source || 'upload'}
+                                    </span>
+                                `}
                             </div>
 
                             <!-- Description -->
                             <p class="text-xs text-slate-300 line-clamp-2 min-h-[32px]">${escapeHtml(w.description || 'No description')}</p>
 
                             <!-- Metrics Strip -->
-                            <div class="flex items-center gap-3 text-[11px] text-slate-400 font-mono pt-1 border-t" style="border-color: var(--border-base);">
+                            <div class="flex items-center flex-wrap gap-3 text-[11px] text-slate-400 font-mono pt-1 border-t" style="border-color: var(--border-base);">
                                 <span><i class="fa-regular fa-file-code text-cyan-400 mr-1"></i> ${w.file_count || 0} files</span>
                                 <span><i class="fa-regular fa-hard-drive text-amber-400 mr-1"></i> ${sizeStr}</span>
-                                ${w.git_branch ? `<span><i class="fa-solid fa-code-branch text-purple-400 mr-1"></i> ${escapeHtml(w.git_branch)}</span>` : ''}
+                                ${w.git_branch ? `<span title="${escapeHtml(w.git_commit_msg || '')}"><i class="fa-brands fa-git-alt text-sky-400 mr-1"></i> ${escapeHtml(w.git_branch)}${w.git_commit ? ' @ ' + escapeHtml(w.git_commit) : ''}</span>` : ''}
                             </div>
 
                             <!-- Deployed Agents Pills -->
@@ -3871,6 +4155,16 @@ Describe the main objective of this capability.
                             </div>
 
                             <div class="flex items-center gap-1">
+                                ${w.source === 'git' || w.git_url ? `
+                                    <button onclick="pullWorkspaceGit('${w.id}')" id="btn-gitpull-${w.id}" class="p-1.5 border rounded-lg text-xs text-sky-400 hover:text-white hover:bg-sky-500/20 transition" style="background-color: var(--bg-input); border-color: var(--border-base);" title="Pull latest changes from remote Git repository (git pull)">
+                                        <i class="fa-solid fa-code-pull-request"></i>
+                                    </button>
+                                ` : ''}
+                                ${w.git_url ? `
+                                    <a href="${escapeHtml(w.git_url)}" target="_blank" class="p-1.5 border rounded-lg text-xs text-slate-400 hover:text-white transition" style="background-color: var(--bg-input); border-color: var(--border-base);" title="Open remote repository on web">
+                                        <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                                    </a>
+                                ` : ''}
                                 <button onclick="openWorkspaceExplorer('${w.id}')" class="p-1.5 border rounded-lg text-xs text-cyan-400 hover:text-white transition" style="background-color: var(--bg-input); border-color: var(--border-base);" title="Browse code & directory tree">
                                     <i class="fa-solid fa-code"></i>
                                 </button>
@@ -4087,10 +4381,18 @@ Describe the main objective of this capability.
             currentExplorerActiveFile = null;
 
             const ws = workspaces.find(w => w.id === wsId);
+            const gitPullBtn = document.getElementById("explorer-git-pull-btn");
             if (ws) {
                 document.getElementById("explorer-ws-title").innerText = ws.name;
                 document.getElementById("explorer-stack-badge").innerText = ws.primary_language || "Codebase";
-                document.getElementById("explorer-ws-path").innerText = `/usr/local/share/cockpit/workspaces/${ws.id}`;
+                document.getElementById("explorer-ws-path").innerText = `/usr/local/share/cockpit/workspaces/${ws.id}${ws.git_branch ? ' • Git: ' + ws.git_branch + (ws.git_commit ? ' @ ' + ws.git_commit : '') : ''}`;
+                if (gitPullBtn) {
+                    if (ws.source === "git" || ws.git_url) {
+                        gitPullBtn.classList.remove("hidden");
+                    } else {
+                        gitPullBtn.classList.add("hidden");
+                    }
+                }
             }
 
             modal.classList.remove("hidden");
@@ -4115,6 +4417,12 @@ Describe the main objective of this capability.
             } catch (e) {
                 document.getElementById("explorer-tree-container").innerHTML = `<div class="text-rose-400 text-xs p-2">Failed to load tree: ${e.message}</div>`;
             }
+        }
+
+        async function pullGitFromExplorer() {
+            if (!currentExplorerWsId) return;
+            await pullWorkspaceGit(currentExplorerWsId);
+            openWorkspaceExplorer(currentExplorerWsId, currentExplorerActiveFile);
         }
 
         function closeWorkspaceExplorer() {
@@ -4791,6 +5099,18 @@ def rename_agent_route():
     except Exception:
         pass
     
+    # Push engine type change to the running container
+    if new_type:
+        try:
+            agent_port = agent.get("port", 8000)
+            requests.post(
+                f"http://{agent['ip']}:{agent_port}/configure_engine",
+                json={"engine_type": new_type, "restart_desktop": True},
+                timeout=5
+            )
+        except Exception:
+            pass  # Container may be offline — engine will apply on next boot via marker file
+    
     return jsonify({"success": True, "agent": agent})
 
 @app.route("/api/agents/remove", methods=["POST", "DELETE"])
@@ -4849,7 +5169,23 @@ def add_agent_route():
     if not name or not ip:
         return jsonify({"error": "Name and IP required"}), 400
     
-    new_id = f"agent-{len(AGENTS)+1}"
+    # Prevent duplicate registrations (same VMID or IP)
+    existing_vmid = next((a for a in AGENTS if a.get("vmid") == vmid), None)
+    if existing_vmid:
+        return jsonify({"success": True, "agent": existing_vmid, "agents": AGENTS, "note": "Agent with this VMID already registered"})
+    
+    existing_ip = next((a for a in AGENTS if a.get("ip") == ip), None)
+    if existing_ip:
+        return jsonify({"success": True, "agent": existing_ip, "agents": AGENTS, "note": "Agent with this IP already registered"})
+    
+    # Generate unique agent ID (avoid collisions with existing IDs)
+    existing_ids = {a["id"] for a in AGENTS}
+    counter = len(AGENTS) + 1
+    new_id = f"agent-{counter}"
+    while new_id in existing_ids:
+        counter += 1
+        new_id = f"agent-{counter}"
+    
     new_agent = {
         "id": new_id,
         "vmid": vmid,
@@ -4978,17 +5314,21 @@ def upload_workspace():
 @app.route("/api/workspaces/git_clone", methods=["POST"])
 def git_clone_workspace():
     data = request.get_json(force=True, silent=True) or {}
-    repo_url = (data.get("repo_url") or "").strip()
+    raw_repo_url = (data.get("repo_url") or "").strip()
     branch = (data.get("branch") or "").strip()
     ws_name = (data.get("name") or "").strip()
     ws_desc = (data.get("description") or "").strip()
     target_agent = data.get("target_agent", "")
+    token = (data.get("token") or "").strip()
 
-    if not repo_url:
-        return jsonify({"error": "Repository URL is required"}), 400
+    if not raw_repo_url:
+        return jsonify({"error": "Repository URL or 'owner/repo' shorthand is required"}), 400
+
+    clone_url, safe_url, auto_branch = normalize_git_url(raw_repo_url, token)
+    effective_branch = branch or auto_branch or ""
 
     if not ws_name:
-        clean = repo_url.rstrip("/").split("/")[-1]
+        clean = safe_url.rstrip("/").split("/")[-1]
         if clean.endswith(".git"):
             clean = clean[:-4]
         ws_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', clean) or f"repo_{int(time.time())}"
@@ -4997,17 +5337,26 @@ def git_clone_workspace():
     dest_dir = os.path.join(WORKSPACES_DIR, slug_id)
 
     cmd = ["git", "clone", "--depth", "1"]
-    if branch:
-        cmd.extend(["--branch", branch])
-    cmd.extend([repo_url, dest_dir])
+    if effective_branch:
+        cmd.extend(["--branch", effective_branch])
+    cmd.extend([clone_url, dest_dir])
 
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         if res.returncode != 0:
             shutil.rmtree(dest_dir, ignore_errors=True)
-            return jsonify({"error": f"Git clone failed: {res.stderr or res.stdout}"}), 400
+            err_msg = res.stderr or res.stdout
+            if token:
+                err_msg = err_msg.replace(token, "******")
+            return jsonify({"error": f"Git clone failed: {err_msg}"}), 400
 
-        git_branch = branch or "main"
+        git_branch = effective_branch or "main"
+        git_commit = ""
+        git_commit_full = ""
+        git_commit_msg = ""
+        git_commit_author = ""
+        git_commit_date = ""
+
         try:
             b_res = subprocess.run(["git", "-C", dest_dir, "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, timeout=5)
             if b_res.returncode == 0 and b_res.stdout.strip():
@@ -5015,14 +5364,28 @@ def git_clone_workspace():
         except Exception:
             pass
 
+        try:
+            log_res = subprocess.run(["git", "-C", dest_dir, "log", "-1", "--format=%h|%H|%s|%an|%ci"], capture_output=True, text=True, timeout=5)
+            if log_res.returncode == 0 and log_res.stdout.strip():
+                parts = log_res.stdout.strip().split("|")
+                if len(parts) >= 5:
+                    git_commit, git_commit_full, git_commit_msg, git_commit_author, git_commit_date = parts[0], parts[1], parts[2], parts[3], parts[4]
+        except Exception:
+            pass
+
         stats = scan_workspace_stats(dest_dir)
         ws_obj = {
             "id": slug_id,
             "name": ws_name,
-            "description": ws_desc or f"Cloned from {repo_url} ({git_branch})",
+            "description": ws_desc or f"Cloned from {safe_url} ({git_branch})",
             "source": "git",
-            "git_url": repo_url,
+            "git_url": safe_url,
             "git_branch": git_branch,
+            "git_commit": git_commit,
+            "git_commit_full": git_commit_full,
+            "git_commit_msg": git_commit_msg,
+            "git_commit_author": git_commit_author,
+            "git_commit_date": git_commit_date,
             "created_at": time.time(),
             "updated_at": time.time(),
             "file_count": stats["file_count"],
@@ -5041,10 +5404,103 @@ def git_clone_workspace():
         return jsonify({"success": True, "workspace": ws_obj, "deployed": deploy_res})
     except subprocess.TimeoutExpired:
         shutil.rmtree(dest_dir, ignore_errors=True)
-        return jsonify({"error": "Git clone timed out after 60s"}), 504
+        return jsonify({"error": "Git clone timed out after 90s"}), 504
     except Exception as e:
         shutil.rmtree(dest_dir, ignore_errors=True)
+        err_msg = str(e)
+        if token:
+            err_msg = err_msg.replace(token, "******")
+        return jsonify({"error": err_msg}), 500
+
+@app.route("/api/workspaces/<ws_id>/git_pull", methods=["POST"])
+def git_pull_workspace(ws_id):
+    if ws_id not in WORKSPACES:
+        load_workspaces()
+    ws = WORKSPACES.get(ws_id)
+    if not ws:
+        return jsonify({"error": "Workspace not found"}), 404
+
+    dest_dir = os.path.join(WORKSPACES_DIR, ws_id)
+    if not os.path.exists(dest_dir) or not os.path.exists(os.path.join(dest_dir, ".git")):
+        return jsonify({"error": "Workspace is not a valid Git repository"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    auto_redeploy = bool(data.get("auto_redeploy", True))
+
+    try:
+        res = subprocess.run(["git", "-C", dest_dir, "pull"], capture_output=True, text=True, timeout=60)
+        if res.returncode != 0:
+            return jsonify({"error": f"Git pull failed: {res.stderr or res.stdout}"}), 400
+
+        try:
+            log_res = subprocess.run(["git", "-C", dest_dir, "log", "-1", "--format=%h|%H|%s|%an|%ci"], capture_output=True, text=True, timeout=5)
+            if log_res.returncode == 0 and log_res.stdout.strip():
+                parts = log_res.stdout.strip().split("|")
+                if len(parts) >= 5:
+                    ws["git_commit"] = parts[0]
+                    ws["git_commit_full"] = parts[1]
+                    ws["git_commit_msg"] = parts[2]
+                    ws["git_commit_author"] = parts[3]
+                    ws["git_commit_date"] = parts[4]
+        except Exception:
+            pass
+
+        stats = scan_workspace_stats(dest_dir)
+        ws["file_count"] = stats["file_count"]
+        ws["dir_count"] = stats["dir_count"]
+        ws["size_bytes"] = stats["size_bytes"]
+        ws["primary_language"] = stats["primary_language"]
+        ws["updated_at"] = time.time()
+        save_workspaces()
+
+        redeploy_res = None
+        if auto_redeploy and ws.get("synced_agents"):
+            try:
+                redeploy_res = deploy_workspace_to_targets(ws_id, target=ws["synced_agents"])
+            except Exception as de:
+                redeploy_res = {"warning": f"Could not auto-redeploy to agents: {de}"}
+
+        return jsonify({
+            "success": True,
+            "message": "Git repository successfully updated",
+            "git_output": res.stdout.strip(),
+            "workspace": ws,
+            "redeploy": redeploy_res
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Git pull timed out after 60s"}), 504
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/workspaces/<ws_id>/git_status", methods=["GET"])
+def git_status_workspace(ws_id):
+    if ws_id not in WORKSPACES:
+        load_workspaces()
+    ws = WORKSPACES.get(ws_id)
+    if not ws:
+        return jsonify({"error": "Workspace not found"}), 404
+
+    dest_dir = os.path.join(WORKSPACES_DIR, ws_id)
+    if not os.path.exists(dest_dir) or not os.path.exists(os.path.join(dest_dir, ".git")):
+        return jsonify({"is_git": False})
+
+    status_out = ""
+    try:
+        s_res = subprocess.run(["git", "-C", dest_dir, "status", "-s"], capture_output=True, text=True, timeout=5)
+        status_out = s_res.stdout.strip()
+    except Exception:
+        pass
+
+    return jsonify({
+        "is_git": True,
+        "branch": ws.get("git_branch", "main"),
+        "commit": ws.get("git_commit", ""),
+        "commit_msg": ws.get("git_commit_msg", ""),
+        "commit_author": ws.get("git_commit_author", ""),
+        "git_url": ws.get("git_url", ""),
+        "has_changes": bool(status_out),
+        "status_summary": status_out
+    })
 
 @app.route("/api/workspaces/create_template", methods=["POST"])
 def create_workspace_template():
