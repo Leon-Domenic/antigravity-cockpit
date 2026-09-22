@@ -124,7 +124,7 @@ def load_agents_config():
         try:
             with open(AGENTS_CONFIG_FILE, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-                if isinstance(saved, list) and len(saved) > 0:
+                if isinstance(saved, list):
                     for a in saved:
                         if "type" not in a:
                             a["type"] = "antigravity"
@@ -2246,7 +2246,7 @@ HTML_TEMPLATE = """
     <!-- JAVASCRIPT COCKPIT CLIENT LOGIC                              -->
     <!-- ============================================================ -->
     <script>
-        let agents = """ + json.dumps(AGENTS) + """;
+        let agents = __AGENTS_JSON_PLACEHOLDER__;
         let currentView = "agent-1"; // "overview" or "agent-1" ... "agent-5"
         let fleetStatuses = {};
         let lastLogsHash = "";
@@ -2308,17 +2308,32 @@ HTML_TEMPLATE = """
         }
 
         // Build DOM structure ONCE at startup
-        function init() {
+        async function init() {
             const savedTheme = localStorage.getItem("cockpit_theme") || "onyx-stealth";
             setTheme(savedTheme);
             applyLayoutMode();
+
+            try {
+                const res = await fetch("/api/agents");
+                if (res.ok) {
+                    const data = await res.json();
+                    if (Array.isArray(data.agents)) {
+                        agents = data.agents;
+                    }
+                }
+            } catch (e) {
+                console.warn("Using embedded agents:", e);
+            }
 
             buildSidebarDom();
             buildDedicatedIframes();
             buildOverviewScreensGrid();
             buildFleetTableDom();
 
-            selectView("agent-1");
+            if (!agents.some(a => a.id === currentView)) {
+                currentView = agents.length > 0 ? agents[0].id : "overview";
+            }
+            selectView(currentView);
             fetchSkillsLibrary();
             fetchWorkspaces();
             fetchAllStatus();
@@ -3918,10 +3933,15 @@ Describe the main objective of this capability.
                 });
                 const data = await res.json();
                 if (data.success) {
-                    agents = agents.filter(a => a.id !== agentToRemove);
+                    if (Array.isArray(data.agents)) {
+                        agents = data.agents;
+                    } else {
+                        agents = agents.filter(a => a.id !== agentToRemove);
+                    }
                     
                     if (currentView === agentToRemove) {
-                        selectView("overview");
+                        currentView = agents.length > 0 ? agents[0].id : "overview";
+                        selectView(currentView);
                     }
 
                     buildSidebarDom();
@@ -5613,7 +5633,9 @@ def pve_api_request(method, agent, path_suffix, **kwargs):
 
 @app.route("/")
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    load_agents_config()
+    rendered = HTML_TEMPLATE.replace("__AGENTS_JSON_PLACEHOLDER__", json.dumps(AGENTS))
+    return Response(rendered, mimetype="text/html")
 
 @app.route("/api/status")
 def get_all_status():
@@ -6141,6 +6163,7 @@ def get_package_file(filename):
 # ------------------------------------------------------------------
 @app.route("/api/agents", methods=["GET"])
 def get_agents_list():
+    load_agents_config()
     return jsonify({"agents": AGENTS})
 
 @app.route("/api/agents/rename", methods=["POST"])
