@@ -10,6 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 COCKPIT_HOST="${COCKPIT_HOST:-192.168.178.168:3000}"
+COCKPIT_HOST="${COCKPIT_HOST#http://}"
+COCKPIT_HOST="${COCKPIT_HOST#https://}"
+COCKPIT_HOST="${COCKPIT_HOST%/}"
 
 echo "===================================================================="
 echo ">>> Installing Open Claw (Autonomous Web Intelligence & Crawler)..."
@@ -59,7 +62,7 @@ fi
 
 # 5. Install Python Scraping, Stealth & Anti-Bot Libraries
 echo ">>> Installing crawling and stealth extraction libraries..."
-pip3 install --break-system-packages \
+pip3 install --break-system-packages --ignore-installed \
     playwright \
     beautifulsoup4 \
     scrapy \
@@ -67,11 +70,11 @@ pip3 install --break-system-packages \
     requests \
     lxml \
     tldextract \
-    fake-useragent >/dev/null 2>&1 || pip3 install playwright beautifulsoup4 scrapy curl_cffi
+    fake-useragent >/dev/null 2>&1 || pip3 install --break-system-packages playwright beautifulsoup4 requests
 
 # Install Playwright browser binaries with all OS dependencies
-echo ">>> Installing Playwright Chromium & Firefox binaries..."
-playwright install --with-deps chromium firefox >/dev/null 2>&1 || playwright install chromium
+echo ">>> Installing Playwright Chromium browser binaries..."
+python3 -m playwright install --with-deps chromium >/dev/null 2>&1 || playwright install chromium >/dev/null 2>&1 || true
 
 # 6. Apply Sandbox & Kernel Compatibility Adjustments
 echo ">>> Tuning Chromium sandbox and kernel namespaces..."

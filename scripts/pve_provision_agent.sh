@@ -12,7 +12,7 @@
 set -e
 
 COCKPIT_HOST="${COCKPIT_HOST:-192.168.178.168:3000}"
-STORAGE="${STORAGE:-local-lvm}"
+STORAGE="${STORAGE:-ssd-storage}"
 BRIDGE="${BRIDGE:-vmbr0}"
 ISO_STORAGE="${ISO_STORAGE:-local}"
 

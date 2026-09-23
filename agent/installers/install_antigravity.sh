@@ -10,6 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 COCKPIT_HOST="${COCKPIT_HOST:-192.168.178.168:3000}"
+COCKPIT_HOST="${COCKPIT_HOST#http://}"
+COCKPIT_HOST="${COCKPIT_HOST#https://}"
+COCKPIT_HOST="${COCKPIT_HOST%/}"
 INSTALL_DIR="/home/ubuntu/opt"
 AGENT_DIR="${INSTALL_DIR}/Antigravity-x64"
 
@@ -121,7 +124,7 @@ websockify --web=/usr/share/novnc 6080 localhost:5900 &
 sleep 1
 
 if [ -f "/usr/local/bin/antigravity" ]; then
-    /usr/local/bin/antigravity --no-sandbox &
+    /usr/local/bin/antigravity --no-sandbox /home/ubuntu/workspace &
 fi
 
 wait

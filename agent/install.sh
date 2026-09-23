@@ -7,6 +7,9 @@
 set -e
 
 COCKPIT_HOST="${COCKPIT_HOST:-192.168.178.168:3000}"
+COCKPIT_HOST="${COCKPIT_HOST#http://}"
+COCKPIT_HOST="${COCKPIT_HOST#https://}"
+COCKPIT_HOST="${COCKPIT_HOST%/}"
 ENGINE="antigravity"
 
 # Parse CLI arguments
@@ -20,11 +23,23 @@ while [ $# -gt 0 ]; do
             ENGINE="${1#*=}"
             shift
             ;;
+        --cockpit)
+            COCKPIT_HOST="$2"
+            shift 2
+            ;;
+        --cockpit=*)
+            COCKPIT_HOST="${1#*=}"
+            shift
+            ;;
         *)
             shift
             ;;
     esac
 done
+
+COCKPIT_HOST="${COCKPIT_HOST#http://}"
+COCKPIT_HOST="${COCKPIT_HOST#https://}"
+COCKPIT_HOST="${COCKPIT_HOST%/}"
 
 ENGINE_LOWER="$(echo "$ENGINE" | tr '[:upper:]' '[:lower:]')"
 
@@ -38,6 +53,13 @@ echo "===================================================================="
 if [ "$(id -u)" -ne 0 ]; then
     echo "❌ Error: This installer must be run as root (use sudo)."
     exit 1
+fi
+
+# Ensure curl/wget present in fresh minimal container
+if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
+    echo ">>> Installing curl and wget..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq && apt-get install -y -qq curl wget ca-certificates >/dev/null 2>&1 || true
 fi
 
 TMP_DIR="$(mktemp -d /tmp/cockpit-installer-XXXXXX)"

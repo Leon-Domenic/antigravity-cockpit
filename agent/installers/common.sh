@@ -83,7 +83,11 @@ install_core_dependencies() {
 
 # Deploy Agent Bridge API (:8000)
 deploy_agent_bridge() {
-    local cockpit_host="$1"
+    local raw_host="$1"
+    local cockpit_host="${raw_host#http://}"
+    cockpit_host="${cockpit_host#https://}"
+    cockpit_host="${cockpit_host%/}"
+
     echo ">>> Deploying Agent Bridge API (:8000)..."
     mkdir -p /usr/local/bin /home/ubuntu/workspace /root/workspace /tmp/agent_media
     chown -R ubuntu:ubuntu /home/ubuntu/workspace 2>/dev/null || true
@@ -113,7 +117,11 @@ EOF
 
 # Install Cockpit Skills Library
 install_skills_library() {
-    local cockpit_host="$1"
+    local raw_host="$1"
+    local cockpit_host="${raw_host#http://}"
+    cockpit_host="${cockpit_host#https://}"
+    cockpit_host="${cockpit_host%/}"
+
     echo ">>> Pre-loading Cockpit Skills Library..."
     mkdir -p /root/.gemini/skills /root/.gemini/config/skills /home/ubuntu/.gemini/skills
     wget -q -O /tmp/cockpit-skills-library.tar.gz "http://${cockpit_host}/packages/cockpit-skills-library.tar.gz" || true
@@ -123,4 +131,92 @@ install_skills_library() {
         tar -xzf /tmp/cockpit-skills-library.tar.gz -C /home/ubuntu/.gemini/skills/ 2>/dev/null || true
         rm -f /tmp/cockpit-skills-library.tar.gz
     fi
+}
+
+# Setup Web Desktop / noVNC Terminal for CLI and Specialized Nodes
+setup_novnc_terminal() {
+    local node_title="$1"
+    local node_subtitle="$2"
+    local custom_cmd="$3"
+
+    echo ">>> Setting up Web Desktop & noVNC Terminal on port 6080..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y -qq xvfb openbox x11vnc novnc websockify xterm >/dev/null 2>&1 || true
+
+    mkdir -p /root/.config/openbox /home/ubuntu/.config/openbox /etc/xdg/openbox
+    cat << 'EOF_OB' > /etc/xdg/openbox/rc.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <desktops><number>1</number><firstdesk>1</firstdesk><names><name>Node Console</name></names></desktops>
+  <applications>
+    <application class="*">
+      <maximized>yes</maximized>
+      <decor>no</decor>
+    </application>
+  </applications>
+</openbox_config>
+EOF_OB
+    cp /etc/xdg/openbox/rc.xml /root/.config/openbox/rc.xml
+    cp /etc/xdg/openbox/rc.xml /home/ubuntu/.config/openbox/rc.xml 2>/dev/null || true
+
+    # Create terminal startup banner script
+    cat << EOF_BANNER > /usr/local/bin/node-terminal-banner.sh
+#!/bin/bash
+clear
+cat << "BANNER"
+╔══════════════════════════════════════════════════════════════════╗
+║   ${node_title}
+║   ${node_subtitle}
+║   Workspace: /home/ubuntu/workspace  •  API Bridge: Port 8000   
+╚══════════════════════════════════════════════════════════════════╝
+BANNER
+echo ""
+cd /home/ubuntu/workspace 2>/dev/null || cd /root
+${custom_cmd:-exec bash}
+EOF_BANNER
+    chmod +x /usr/local/bin/node-terminal-banner.sh
+
+    cat << 'EOF_DESK' > /usr/local/bin/start-webdesktop.sh
+#!/bin/bash
+export DISPLAY=:1
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+
+Xvfb :1 -screen 0 1920x1080x24 -listen tcp -ac &
+sleep 1
+
+openbox &
+sleep 1
+
+x11vnc -display :1 -nopw -listen 0.0.0.0 -xkb -forever -shared &
+sleep 1
+
+websockify --web=/usr/share/novnc 6080 localhost:5900 &
+sleep 1
+
+mkdir -p /home/ubuntu/workspace
+xterm -fa 'Monospace' -fs 14 -bg '#0d1117' -fg '#58a6ff' -geometry 160x50+10+10 -e /usr/local/bin/node-terminal-banner.sh &
+
+wait
+EOF_DESK
+    chmod +x /usr/local/bin/start-webdesktop.sh
+
+    cat << 'EOF_SERV' > /etc/systemd/system/webdesktop.service
+[Unit]
+Description=Web Desktop VNC Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/start-webdesktop.sh
+Restart=always
+RestartSec=3
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
+EOF_SERV
+
+    systemctl daemon-reload
+    systemctl enable --now webdesktop.service
+    systemctl restart webdesktop.service || true
 }

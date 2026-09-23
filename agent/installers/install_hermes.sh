@@ -10,6 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 COCKPIT_HOST="${COCKPIT_HOST:-192.168.178.168:3000}"
+COCKPIT_HOST="${COCKPIT_HOST#http://}"
+COCKPIT_HOST="${COCKPIT_HOST#https://}"
+COCKPIT_HOST="${COCKPIT_HOST%/}"
 
 echo "===================================================================="
 echo ">>> Installing Hermes Agent (Nous Research Reasoning Node)..."
@@ -39,7 +42,7 @@ fi
 
 # 5. Install Python Tooling & Reasoning Libraries
 echo ">>> Installing LangChain, Pydantic, and HuggingFace toolchain..."
-pip3 install --break-system-packages \
+pip3 install --break-system-packages --ignore-installed \
     openai \
     pydantic \
     langchain \
@@ -49,7 +52,7 @@ pip3 install --break-system-packages \
     rich \
     httpx \
     fastapi \
-    uvicorn >/dev/null 2>&1 || pip3 install openai pydantic langchain huggingface_hub requests
+    uvicorn >/dev/null 2>&1 || pip3 install --break-system-packages openai pydantic requests
 
 # 6. Check for Local LLM Engine (Ollama / llama.cpp / vLLM)
 echo ">>> Checking local LLM inference capabilities..."
@@ -85,12 +88,16 @@ if __name__ == "__main__":
 EOF
 chmod +x /usr/local/bin/hermes-agent-runner.py
 
-# 8. Deploy Agent Bridge & Skills
+# 8. Deploy Web Console on port 6080 (Hermes Theme)
+setup_novnc_terminal "HERMES AGENT - Advanced Reasoning & Function Calling" "Nous Research Hermes • Ollama Engine • LangChain / Pydantic" "python3 /usr/local/bin/hermes-agent-runner.py || exec bash"
+
+# 9. Deploy Agent Bridge & Skills
 deploy_agent_bridge "${COCKPIT_HOST}"
 install_skills_library "${COCKPIT_HOST}"
 
 echo "===================================================================="
 echo ">>> Hermes Agent Node Installed Successfully!"
 echo ">>> Engine Type: hermes (Reasoning & Function Calling)"
-echo ">>> Agent API Bridge: http://$(hostname -I | awk '{print $1}'):8000/status"
+echo ">>> noVNC Live Console: http://$(hostname -I | awk '{print $1}'):6080"
+echo ">>> Agent API Bridge:   http://$(hostname -I | awk '{print $1}'):8000/status"
 echo "===================================================================="

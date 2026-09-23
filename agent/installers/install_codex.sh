@@ -10,6 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 COCKPIT_HOST="${COCKPIT_HOST:-192.168.178.168:3000}"
+COCKPIT_HOST="${COCKPIT_HOST#http://}"
+COCKPIT_HOST="${COCKPIT_HOST#https://}"
+COCKPIT_HOST="${COCKPIT_HOST%/}"
 
 echo "===================================================================="
 echo ">>> Installing Codex Agent (Code Synthesis & Refactor Node)..."
@@ -39,22 +42,24 @@ npm install -g pnpm yarn tsx typescript >/dev/null 2>&1 || true
 
 # 5. Install Python Code Analysis & Synthesis Tools
 echo ">>> Installing code analysis, formatting, and AST tools..."
-pip3 install --break-system-packages \
+pip3 install --break-system-packages --ignore-installed \
     openai \
-    litellm \
     black \
     flake8 \
     astor \
-    tree-sitter \
     pydantic \
-    requests >/dev/null 2>&1 || pip3 install openai black flake8 astor
+    requests >/dev/null 2>&1 || pip3 install --break-system-packages openai black flake8 astor requests
 
-# 6. Deploy Agent Bridge & Skills Library
+# 6. Deploy Web Desktop Terminal on port 6080 (Codex Theme)
+setup_novnc_terminal "CODEX AGENT - Autonomous Code Synthesis & Refactor" "Node.js 20 LTS • TypeScript • Python AST Analysis • Git" "exec bash"
+
+# 7. Deploy Agent Bridge & Skills Library
 deploy_agent_bridge "${COCKPIT_HOST}"
 install_skills_library "${COCKPIT_HOST}"
 
 echo "===================================================================="
 echo ">>> Codex Agent Node Installed Successfully!"
 echo ">>> Engine Type: codex (Code Synthesis & Refactor)"
-echo ">>> Agent API Bridge: http://$(hostname -I | awk '{print $1}'):8000/status"
+echo ">>> noVNC Live Console: http://$(hostname -I | awk '{print $1}'):6080"
+echo ">>> Agent API Bridge:   http://$(hostname -I | awk '{print $1}'):8000/status"
 echo "===================================================================="

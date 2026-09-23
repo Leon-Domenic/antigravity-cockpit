@@ -10,6 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 COCKPIT_HOST="${COCKPIT_HOST:-192.168.178.168:3000}"
+COCKPIT_HOST="${COCKPIT_HOST#http://}"
+COCKPIT_HOST="${COCKPIT_HOST#https://}"
+COCKPIT_HOST="${COCKPIT_HOST%/}"
 
 echo "===================================================================="
 echo ">>> Installing CEO Executive Orchestrator Node..."
@@ -32,12 +35,16 @@ for doc in "AGENTS.md" "SOUL.md" "HEARTBEAT.md"; do
     wget -q -O "/etc/antigravity/ceo/${doc}" "http://${COCKPIT_HOST}/api/ceo/prompts/${doc}" || true
 done
 
-# 4. Deploy Agent Bridge & Skills Library
+# 4. Deploy Web Console on port 6080 (CEO Theme)
+setup_novnc_terminal "CEO EXECUTIVE NODE - Fleet Leader & Autonomous Orchestrator" "Paperclip Protocol • Charter: AGENTS.md / SOUL.md / HEARTBEAT.md" "cat /etc/antigravity/ceo/SOUL.md 2>/dev/null; exec bash"
+
+# 5. Deploy Agent Bridge & Skills Library
 deploy_agent_bridge "${COCKPIT_HOST}"
 install_skills_library "${COCKPIT_HOST}"
 
 echo "===================================================================="
 echo ">>> CEO Executive Orchestrator Node Installed Successfully!"
 echo ">>> Engine Type: ceo (Fleet Leader & Directive Orchestrator)"
-echo ">>> Agent API Bridge: http://$(hostname -I | awk '{print $1}'):8000/status"
+echo ">>> noVNC Live Console: http://$(hostname -I | awk '{print $1}'):6080"
+echo ">>> Agent API Bridge:   http://$(hostname -I | awk '{print $1}'):8000/status"
 echo "===================================================================="

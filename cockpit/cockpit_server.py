@@ -1,4 +1,4 @@
-import os, sys, json, time, requests, subprocess, base64, io, tarfile, zipfile, shutil, re, hashlib, secrets
+import os, sys, json, time, requests, subprocess, base64, io, tarfile, zipfile, shutil, re, hashlib, secrets, threading
 from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, send_file, Response
 
@@ -114,7 +114,7 @@ DEFAULT_AGENTS = [
     {"id": "agent-2", "vmid": 152, "name": "Agent 2", "type": "antigravity", "vm_type": "lxc",  "role": "Backend Specialist",  "ip": "192.168.178.170", "port": 8000, "vnc_port": 6080},
     {"id": "agent-3", "vmid": 153, "name": "Antigravity", "type": "antigravity", "vm_type": "lxc", "role": "Autonomous Pair Programmer", "ip": "192.168.178.171", "port": 8000, "vnc_port": 6080},
     {"id": "agent-4", "vmid": 156, "name": "Codex (CT 156)", "type": "codex", "vm_type": "lxc", "role": "Code Synthesis & Refactor", "ip": "192.168.178.174", "port": 8000, "vnc_port": 6080},
-    {"id": "agent-5", "vmid": 159, "name": "Hermes Agent (CT 159)", "type": "hermes", "vm_type": "lxc", "role": "Reasoning & Function Calling", "ip": "192.168.178.177", "port": 8000, "vnc_port": 6080}
+    {"id": "agent-5", "vmid": 159, "name": "Hermes Agent (CT 159)", "type": "hermes", "vm_type": "qemu", "role": "Reasoning & Function Calling", "ip": "192.168.178.177", "port": 8000, "vnc_port": 6080}
 ]
 
 AGENTS = list(DEFAULT_AGENTS)
@@ -229,6 +229,146 @@ def sync_fleet_with_proxmox():
         return AGENTS
 
 load_agents_config()
+
+# ------------------------------------------------------------------
+# PROXMOX AUTOMATED PROVISIONING & PROVISION TASK TRACKER
+# ------------------------------------------------------------------
+ENGINE_SPECS = {
+    "antigravity": {"cores": 4, "memory": 6144, "disk": "20G", "swap": 2048, "title": "Antigravity Agent (Google AGY Desktop)"},
+    "codex":       {"cores": 4, "memory": 4096, "disk": "20G", "swap": 2048, "title": "Codex (Code Synthesis & Refactor)"},
+    "hermes":      {"cores": 4, "memory": 6144, "disk": "25G", "swap": 2048, "title": "Hermes Agent (Reasoning & Function Calling)"},
+    "openclaw":    {"cores": 4, "memory": 6144, "disk": "25G", "swap": 2048, "title": "Open Claw (Autonomous Crawler)"},
+    "ceo":         {"cores": 2, "memory": 2048, "disk": "15G", "swap": 1024, "title": "CEO Executive Orchestrator"},
+    "custom":      {"cores": 4, "memory": 4096, "disk": "20G", "swap": 2048, "title": "Custom Agent Node"},
+}
+
+PROVISION_TASKS = {}
+
+def run_pve_cmd(cmd, timeout=360, on_output=None):
+    """Executes a command on the Proxmox VE host via passwordless SSH from CT 150."""
+    ssh_cmd = [
+        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+        f"root@{PROXMOX_HOST}", cmd
+    ]
+    lines = []
+    try:
+        proc = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        for line in iter(proc.stdout.readline, ''):
+            l = line.rstrip()
+            lines.append(l)
+            if on_output:
+                on_output(l)
+        proc.stdout.close()
+        proc.wait(timeout=timeout)
+        return proc.returncode, lines
+    except Exception as e:
+        if on_output:
+            on_output(f"[Exception] {e}")
+        return -1, [str(e)]
+
+def provision_agent_worker(vmid, agent_type, name, role, ip, install_mode="fresh"):
+    task = PROVISION_TASKS.get(vmid)
+    if not task:
+        return
+
+    def log(msg):
+        print(f"[Provision CT {vmid}] {msg}")
+        task["logs"].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+        if len(task["logs"]) > 250:
+            task["logs"] = task["logs"][-250:]
+
+    try:
+        if install_mode == "fresh":
+            specs = ENGINE_SPECS.get(agent_type, ENGINE_SPECS["antigravity"])
+            cores = specs["cores"]
+            memory = specs["memory"]
+            disk = specs["disk"]
+            swap = specs["swap"]
+            
+            task["status"] = "provisioning"
+            task["progress"] = "Extracting clean Ubuntu 24.04 OS template on Proxmox..."
+            task["percent"] = 15
+            log(f"Creating fresh container CT {vmid} (cores={cores}, ram={memory}MB, disk={disk}, swap={swap}MB)...")
+
+            template = "local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+            create_cmd = (
+                f"pct create {vmid} {template} "
+                f"--hostname agy-{agent_type}-{vmid} "
+                f"--cores {cores} --memory {memory} --swap {swap} "
+                f"--storage ssd-storage "
+                f"--net0 name=eth0,bridge=vmbr0,firewall=1,ip={ip}/24,gw=192.168.178.1,type=veth "
+                f"--features nesting=1 --unprivileged 1 "
+                f"--description '{agent_type.title()} Agent: {name} ({role})'"
+            )
+            rc, _ = run_pve_cmd(create_cmd, timeout=90, on_output=log)
+            if rc != 0:
+                task["status"] = "failed"
+                task["error"] = "Failed to create LXC container on Proxmox storage."
+                return
+
+            task["percent"] = 25
+            task["progress"] = f"Resizing rootfs to {disk}..."
+            run_pve_cmd(f"pct resize {vmid} rootfs {disk} || true", timeout=30, on_output=log)
+
+            task["percent"] = 35
+            task["progress"] = f"Starting container CT {vmid}..."
+            log("Starting container...")
+            run_pve_cmd(f"pct start {vmid}", timeout=30, on_output=log)
+            
+            log("Waiting 4s for network interface initialization...")
+            time.sleep(4)
+
+            task["percent"] = 45
+            task["progress"] = "Installing base utilities (curl, wget, ca-certificates)..."
+            log("Bootstrapping container base utilities...")
+            bootstrap_cmd = f"pct exec {vmid} -- bash -c 'export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get install -y -qq curl wget ca-certificates'"
+            rc, _ = run_pve_cmd(bootstrap_cmd, timeout=120, on_output=log)
+
+            task["percent"] = 60
+            task["progress"] = f"Executing official {agent_type.title()} installer package..."
+            log(f"Running: curl -sSL http://192.168.178.168:3000/install.sh | bash -s -- --engine {agent_type} --cockpit 192.168.178.168:3000")
+            
+            installer_cmd = f"pct exec {vmid} -- bash -c 'curl -sSL http://192.168.178.168:3000/install.sh | bash -s -- --engine {agent_type} --cockpit 192.168.178.168:3000'"
+            rc, _ = run_pve_cmd(installer_cmd, timeout=400, on_output=log)
+
+            if rc == 0:
+                task["status"] = "ready"
+                task["percent"] = 100
+                task["progress"] = f"Fresh install of {agent_type.title()} completed successfully!"
+                log(f"✅ Agent CT {vmid} ({agent_type}) is fully installed and operational!")
+            else:
+                task["status"] = "warning"
+                task["percent"] = 100
+                task["progress"] = "Container running, installer finished with warnings."
+                log("⚠️ Installer finished with non-zero exit code, check logs.")
+        else:
+            task["status"] = "provisioning"
+            task["progress"] = f"Cloning CT 199 to new CT {vmid}..."
+            task["percent"] = 40
+            log(f"Cloning template CT 199 to CT {vmid}...")
+            clone_cmd = f"pct clone 199 {vmid} --hostname agy-{agent_type}-{vmid} --description '{agent_type.title()} Agent: {name} ({role})'"
+            rc, _ = run_pve_cmd(clone_cmd, timeout=60, on_output=log)
+            if rc != 0:
+                task["status"] = "failed"
+                task["error"] = "Failed to clone CT 199."
+                return
+            
+            task["percent"] = 70
+            task["progress"] = f"Configuring network {ip} and starting CT {vmid}..."
+            run_pve_cmd(f"pct set {vmid} --net0 name=eth0,bridge=vmbr0,firewall=1,gw=192.168.178.1,ip={ip}/24,type=veth", timeout=20, on_output=log)
+            run_pve_cmd(f"pct start {vmid}", timeout=20, on_output=log)
+            task["status"] = "ready"
+            task["percent"] = 100
+            task["progress"] = "Clone completed successfully!"
+            log(f"✅ CT {vmid} cloned and started!")
+
+    except Exception as e:
+        task["status"] = "failed"
+        task["error"] = str(e)
+        log(f"Error during provisioning: {e}")
+    finally:
+        task["finished_at"] = time.time()
+
 
 # ------------------------------------------------------------------
 # WORKSPACES STORAGE & METADATA CONFIGURATION
@@ -774,6 +914,24 @@ HTML_TEMPLATE = """
                 </div>
                 <span id="nav-ceo-badge" class="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono border" style="background: rgba(245, 158, 11, 0.15); color: #f59e0b; border-color: rgba(245, 158, 11, 0.3);">
                     CEO
+                </span>
+            </button>
+            <button onclick="openGitConfigModal()" id="nav-btn-git" class="w-full flex items-center justify-between px-3.5 py-2 rounded-xl transition text-xs font-semibold border" style="border-color: var(--border-base); background-color: var(--bg-input); color: var(--text-main);" title="Manage Git Credentials, PATs, and Author Profiles">
+                <div class="flex items-center gap-2.5">
+                    <i class="fa-brands fa-git-alt text-sky-400"></i>
+                    <span>Git Auth & Sync</span>
+                </div>
+                <span id="nav-git-badge" class="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono border" style="background: var(--badge-bg); color: var(--badge-text); border-color: var(--border-base);">
+                    Git
+                </span>
+            </button>
+            <button onclick="openAuthModal()" id="nav-btn-auth" class="w-full flex items-center justify-between px-3.5 py-2 rounded-xl transition text-xs font-semibold border" style="border-color: var(--border-base); background-color: var(--bg-input); color: var(--text-main);" title="User Authentication & Security">
+                <div class="flex items-center gap-2.5">
+                    <i class="fa-solid fa-user-shield text-indigo-400"></i>
+                    <span id="nav-auth-user-label">User Auth</span>
+                </div>
+                <span id="nav-auth-badge" class="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono border" style="background: var(--badge-bg); color: var(--badge-text); border-color: var(--border-base);">
+                    Account
                 </span>
             </button>
         </div>
@@ -1612,7 +1770,38 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
 
-                <!-- STEP 2: Choose Target Deployment -->
+                <!-- STEP 2: Installation Strategy -->
+                <div class="pt-4 border-t space-y-2.5" style="border-color: var(--border-base);">
+                    <div class="flex justify-between items-center mb-1">
+                        <h4 class="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                            <i class="fa-solid fa-microchip text-amber-400"></i> Step 2: Choose Installation Strategy
+                        </h4>
+                        <span class="text-[10px] text-amber-400 font-mono font-semibold" id="selected-install-mode-badge">Clean OS Install</span>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <label onclick="selectInstallMode('fresh')" class="p-3 rounded-xl border cursor-pointer transition flex items-start gap-3" id="mode-fresh-card" style="background-color: rgba(245, 158, 11, 0.08); border: 2px solid #f59e0b;">
+                            <input type="radio" name="install_mode" value="fresh" checked class="mt-1 accent-amber-500">
+                            <div>
+                                <div class="text-xs font-bold text-white flex items-center gap-1.5">
+                                    <span>🌟 Clean Fresh OS Install</span>
+                                    <span class="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">Recommended</span>
+                                </div>
+                                <div class="text-[10px] text-slate-300 mt-1">Pristine Ubuntu 24.04 OS template + live execution of the chosen framework installer package. No recycled disk state.</div>
+                            </div>
+                        </label>
+                        <label onclick="selectInstallMode('clone')" class="p-3 rounded-xl border cursor-pointer transition flex items-start gap-3 opacity-75 hover:opacity-100" id="mode-clone-card" style="background-color: var(--bg-input); border: 1px solid var(--border-base);">
+                            <input type="radio" name="install_mode" value="clone" class="mt-1 accent-amber-500">
+                            <div>
+                                <div class="text-xs font-bold text-white flex items-center gap-1.5">
+                                    <span>⚡ Fast Clone (Template 199)</span>
+                                </div>
+                                <div class="text-[10px] text-slate-400 mt-1">Clones existing snapshot of CT 199. Near-instant (~2s), but uses existing base container.</div>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- STEP 3: Choose Target Deployment -->
                 <div class="pt-4 border-t space-y-4" style="border-color: var(--border-base);">
                     <!-- Standby Containers Section -->
                     <div>
@@ -1621,7 +1810,7 @@ HTML_TEMPLATE = """
                                 <i class="fa-solid fa-server text-blue-400"></i> Option A: Launch Standby Fleet Node (PVE)
                             </h4>
                             <span class="text-[10px] text-emerald-400 font-mono font-semibold flex items-center gap-1">
-                                <i class="fa-solid fa-bolt"></i> ~1.5s Fast Launch
+                                <i class="fa-solid fa-bolt"></i> Fast Launch
                             </span>
                         </div>
                         <div id="standby-agents-list" class="space-y-2.5">
@@ -1693,6 +1882,57 @@ HTML_TEMPLATE = """
                 <button onclick="closeAddAgentModal()" class="px-4 py-1.5 border rounded-xl text-xs font-medium transition" style="background-color: var(--bg-input); border-color: var(--border-base); color: var(--text-main);">
                     Close
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- LIVE PROVISIONING PROGRESS MODAL                             -->
+    <!-- ============================================================ -->
+    <div id="provision-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md hidden">
+        <div class="glass w-full max-w-xl rounded-3xl overflow-hidden shadow-2xl flex flex-col border" style="background-color: var(--bg-card); border-color: var(--border-base);">
+            <div class="px-6 py-4 border-b flex items-center justify-between" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                <div class="flex items-center space-x-3">
+                    <div class="w-9 h-9 rounded-xl border flex items-center justify-center text-amber-400 text-base" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        <i class="fa-solid fa-gear fa-spin" id="provision-modal-spinner"></i>
+                    </div>
+                    <div>
+                        <h3 class="text-sm font-bold text-white" id="provision-modal-title">Provisioning New Agent Node</h3>
+                        <p class="text-[10px] text-slate-400" id="provision-modal-subtitle">Deploying clean Ubuntu 24.04 OS & agent packages</p>
+                    </div>
+                </div>
+                <button onclick="closeProvisionModal()" class="w-8 h-8 rounded-xl border flex items-center justify-center text-slate-400 hover:text-white transition" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            
+            <div class="p-6 space-y-4">
+                <div>
+                    <div class="flex justify-between items-center text-xs mb-1.5">
+                        <span class="font-semibold text-white" id="provision-stage-text">Preparing container on Proxmox...</span>
+                        <span class="font-mono text-amber-400 font-bold" id="provision-percent-text">0%</span>
+                    </div>
+                    <div class="w-full h-2.5 rounded-full bg-slate-800 overflow-hidden border border-slate-700">
+                        <div id="provision-progress-bar" class="h-full bg-gradient-to-r from-amber-500 to-emerald-500 rounded-full transition-all duration-300" style="width: 0%;"></div>
+                    </div>
+                </div>
+
+                <div class="rounded-xl border overflow-hidden" style="background-color: #0b0f19; border-color: var(--border-base);">
+                    <div class="px-3 py-1.5 border-b flex items-center justify-between text-[11px] text-slate-400" style="border-color: rgba(255,255,255,0.07);">
+                        <span class="font-mono"><i class="fa-solid fa-terminal mr-1.5 text-amber-400"></i>Live Installation Stream</span>
+                        <span class="text-[10px] text-emerald-400 font-mono">pct exec</span>
+                    </div>
+                    <div id="provision-live-logs" class="p-3 text-[11px] font-mono text-slate-300 h-48 overflow-y-auto space-y-1 select-text scrollbar-thin">
+                        <div class="text-slate-500 italic">Initializing automated provisioning pipeline...</div>
+                    </div>
+                </div>
+
+                <div class="flex items-center justify-between pt-2">
+                    <span class="text-[11px] text-slate-400" id="provision-timer">Elapsed: 0s</span>
+                    <button id="provision-done-btn" onclick="finishProvisioningView()" class="px-4 py-2 btn-action-primary rounded-xl text-xs font-semibold hidden flex items-center gap-1.5">
+                        <i class="fa-solid fa-arrow-right"></i> Open Agent Console
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -2552,6 +2792,167 @@ HTML_TEMPLATE = """
                     Close Suite
                 </button>
             </div>
+    <!-- ============================================================ -->
+    <!-- GIT CONFIGURATION & CREDENTIALS MODAL                        -->
+    <!-- ============================================================ -->
+    <div id="git-config-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md hidden">
+        <div class="glass w-full max-w-xl rounded-3xl overflow-hidden shadow-2xl flex flex-col border" style="background-color: var(--bg-card); border-color: var(--border-base);">
+            <div class="px-6 py-4 border-b flex items-center justify-between flex-shrink-0" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-xl border flex items-center justify-center text-sky-400 text-lg shadow-inner" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        <i class="fa-brands fa-git-alt"></i>
+                    </div>
+                    <div>
+                        <h2 class="text-base font-bold text-white tracking-tight">Git Credentials & Agent Sync</h2>
+                        <p class="text-xs text-slate-400">Connect GitHub/GitLab to clone private repos, pull, and push code seamlessly across all agents</p>
+                    </div>
+                </div>
+                <button onclick="closeGitConfigModal()" class="w-8 h-8 rounded-xl border flex items-center justify-center text-slate-400 hover:text-white transition" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <div class="p-6 space-y-4">
+                <div class="space-y-1">
+                    <label class="text-xs font-semibold text-slate-300">Git Provider</label>
+                    <select id="git-cfg-provider" class="w-full px-3.5 py-2.5 rounded-xl border text-xs font-semibold text-white focus:outline-none" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        <option value="github.com">GitHub (github.com)</option>
+                        <option value="gitlab.com">GitLab (gitlab.com)</option>
+                        <option value="custom">Self-Hosted / Generic Git</option>
+                    </select>
+                </div>
+
+                <div class="space-y-1">
+                    <div class="flex justify-between items-center">
+                        <label class="text-xs font-semibold text-slate-300">Personal Access Token (PAT)</label>
+                        <span id="git-token-status" class="text-[10px] font-mono text-slate-400">Not configured</span>
+                    </div>
+                    <div class="relative">
+                        <input type="password" id="git-cfg-token" placeholder="ghp_... or glpat-... (repo scope required for private repos)" class="w-full px-3.5 py-2.5 pr-10 rounded-xl border text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        <button type="button" onclick="togglePasswordVisibility('git-cfg-token')" class="absolute right-3 top-2.5 text-slate-400 hover:text-white text-xs">
+                            <i class="fa-regular fa-eye"></i>
+                        </button>
+                    </div>
+                    <p class="text-[11px] text-slate-400">Stored securely in Cockpit and synced to agent <code class="text-sky-300 font-mono">~/.git-credentials</code> so agents can git pull and push autonomously.</p>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="space-y-1">
+                        <label class="text-xs font-semibold text-slate-300">Default Commit Author Name</label>
+                        <input type="text" id="git-cfg-username" placeholder="Antigravity Agent" class="w-full px-3.5 py-2.5 rounded-xl border text-xs text-white placeholder-slate-500 focus:outline-none" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="text-xs font-semibold text-slate-300">Default Commit Author Email</label>
+                        <input type="email" id="git-cfg-email" placeholder="agent@antigravity.cockpit" class="w-full px-3.5 py-2.5 rounded-xl border text-xs text-white placeholder-slate-500 focus:outline-none" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    </div>
+                </div>
+
+                <div id="git-cfg-sync-feedback" class="p-3 rounded-xl text-xs font-mono hidden"></div>
+            </div>
+
+            <div class="px-6 py-3 border-t flex justify-between items-center text-xs" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                <button type="button" onclick="closeGitConfigModal()" class="px-4 py-2 rounded-xl border text-slate-300 hover:bg-white/5 transition" style="border-color: var(--border-base);">
+                    Cancel
+                </button>
+                <button type="button" onclick="saveGitConfig()" id="btn-save-git-cfg" class="px-4 py-2 btn-action-primary rounded-xl text-white font-semibold flex items-center gap-2 shadow">
+                    <i class="fa-solid fa-cloud-arrow-up"></i> Save & Sync to All Agents
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- USER AUTHENTICATION MODAL                                    -->
+    <!-- ============================================================ -->
+    <div id="auth-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md hidden">
+        <div class="glass w-full max-w-md rounded-3xl overflow-hidden shadow-2xl flex flex-col border" style="background-color: var(--bg-card); border-color: var(--border-base);">
+            <div class="px-6 py-4 border-b flex items-center justify-between flex-shrink-0" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-xl border flex items-center justify-center text-indigo-400 text-lg shadow-inner" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        <i class="fa-solid fa-user-shield"></i>
+                    </div>
+                    <div>
+                        <h2 class="text-base font-bold text-white tracking-tight">Cockpit Authentication</h2>
+                        <p class="text-xs text-slate-400">Access control & multi-agent system security</p>
+                    </div>
+                </div>
+                <button onclick="closeAuthModal()" class="w-8 h-8 rounded-xl border flex items-center justify-center text-slate-400 hover:text-white transition" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <div class="p-6 space-y-4">
+                <div id="auth-signed-in-view" class="space-y-4 hidden">
+                    <div class="p-4 rounded-2xl border text-center space-y-2" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        <div class="w-12 h-12 rounded-full mx-auto flex items-center justify-center text-xl bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                            <i class="fa-solid fa-user-check"></i>
+                        </div>
+                        <h4 class="text-sm font-bold text-white" id="auth-user-display-name">Administrator</h4>
+                        <div class="text-[11px] font-mono text-emerald-400">● Session Active</div>
+                    </div>
+                    <button type="button" onclick="submitLogout()" class="w-full py-2.5 rounded-xl border text-xs font-semibold text-rose-300 hover:bg-rose-500/10 transition border-rose-500/30 flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-right-from-bracket"></i> Sign Out
+                    </button>
+                </div>
+
+                <div id="auth-login-form" class="space-y-3">
+                    <div class="space-y-1">
+                        <label class="text-xs font-semibold text-slate-300">Username</label>
+                        <input type="text" id="auth-input-username" value="admin" class="w-full px-3.5 py-2.5 rounded-xl border text-xs text-white placeholder-slate-500 focus:outline-none" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="text-xs font-semibold text-slate-300">Password</label>
+                        <input type="password" id="auth-input-password" placeholder="••••••••" class="w-full px-3.5 py-2.5 rounded-xl border text-xs text-white placeholder-slate-500 focus:outline-none" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    </div>
+                    <div id="auth-login-feedback" class="text-xs text-rose-400 font-mono hidden"></div>
+                    <button type="button" onclick="submitLogin()" id="btn-submit-login" class="w-full py-2.5 btn-action-primary rounded-xl text-xs font-bold text-white flex items-center justify-center gap-2 shadow mt-2">
+                        <i class="fa-solid fa-lock-open"></i> Sign In to Cockpit
+                    </button>
+                    <div class="pt-2 border-t text-[11px] text-slate-400 leading-relaxed" style="border-color: var(--border-base);">
+                        <span class="font-semibold text-slate-300">Default Credentials:</span> <code class="font-mono text-indigo-300">admin</code> / <code class="font-mono text-indigo-300">antigravity</code>. Bearer tokens from NextAuth or Zitadel OIDC are verified automatically.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- GIT COMMIT MODAL                                             -->
+    <!-- ============================================================ -->
+    <div id="git-commit-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md hidden">
+        <div class="glass w-full max-w-md rounded-3xl overflow-hidden shadow-2xl flex flex-col border" style="background-color: var(--bg-card); border-color: var(--border-base);">
+            <div class="px-6 py-4 border-b flex items-center justify-between flex-shrink-0" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-xl border flex items-center justify-center text-emerald-400 text-lg shadow-inner" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        <i class="fa-solid fa-code-commit"></i>
+                    </div>
+                    <div>
+                        <h2 class="text-base font-bold text-white tracking-tight">Commit Workspace Changes</h2>
+                        <p class="text-xs text-slate-400" id="git-commit-ws-name">Stage and commit all changes</p>
+                    </div>
+                </div>
+                <button onclick="closeGitCommitModal()" class="w-8 h-8 rounded-xl border flex items-center justify-center text-slate-400 hover:text-white transition" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <div class="p-6 space-y-4">
+                <input type="hidden" id="git-commit-ws-id">
+                <div class="space-y-1">
+                    <label class="text-xs font-semibold text-slate-300">Commit Message</label>
+                    <textarea id="git-commit-message" rows="3" placeholder="Describe the changes made by the agent..." class="w-full px-3.5 py-2.5 rounded-xl border text-xs text-white placeholder-slate-500 focus:outline-none" style="background-color: var(--bg-input); border-color: var(--border-base);"></textarea>
+                </div>
+                <div id="git-commit-feedback" class="text-xs font-mono hidden"></div>
+            </div>
+
+            <div class="px-6 py-3 border-t flex justify-between items-center text-xs" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                <button type="button" onclick="closeGitCommitModal()" class="px-4 py-2 rounded-xl border text-slate-300 hover:bg-white/5 transition" style="border-color: var(--border-base);">
+                    Cancel
+                </button>
+                <button type="button" onclick="submitGitCommit()" id="btn-submit-commit" class="px-4 py-2 btn-action-primary rounded-xl text-white font-semibold flex items-center gap-2 shadow">
+                    <i class="fa-solid fa-check"></i> Commit Changes
+                </button>
+            </div>
         </div>
     </div>
 
@@ -2651,6 +3052,8 @@ HTML_TEMPLATE = """
             selectView(currentView);
             fetchSkillsLibrary();
             fetchWorkspaces();
+            loadGitConfigUI();
+            checkAuthStatus();
             fetchAllStatus();
             setInterval(fetchAllStatus, 6000);
             setInterval(fetchCurrentLogs, 2500);
@@ -4578,6 +4981,26 @@ Describe the main objective of this capability.
             renderAddEngineCards();
         }
 
+        let selectedInstallMode = "fresh";
+
+        function selectInstallMode(mode) {
+            selectedInstallMode = mode;
+            const freshCard = document.getElementById("mode-fresh-card");
+            const cloneCard = document.getElementById("mode-clone-card");
+            const badge = document.getElementById("selected-install-mode-badge");
+            
+            if (mode === "fresh") {
+                if (freshCard) { freshCard.style.border = "2px solid #f59e0b"; freshCard.style.backgroundColor = "rgba(245, 158, 11, 0.08)"; freshCard.classList.remove("opacity-75"); }
+                if (cloneCard) { cloneCard.style.border = "1px solid var(--border-base)"; cloneCard.style.backgroundColor = "var(--bg-input)"; cloneCard.classList.add("opacity-75"); }
+                if (badge) badge.innerText = "Clean OS Install";
+            } else {
+                if (cloneCard) { cloneCard.style.border = "2px solid #f59e0b"; cloneCard.style.backgroundColor = "rgba(245, 158, 11, 0.08)"; cloneCard.classList.remove("opacity-75"); }
+                if (freshCard) { freshCard.style.border = "1px solid var(--border-base)"; freshCard.style.backgroundColor = "var(--bg-input)"; freshCard.classList.add("opacity-75"); }
+                if (badge) badge.innerText = "Template 199 Clone";
+            }
+            renderStandbyList();
+        }
+
         function renderStandbyList() {
             const standbyList = document.getElementById("standby-agents-list");
             if (!standbyList) return;
@@ -4605,6 +5028,16 @@ Describe the main objective of this capability.
             const manualIp = document.getElementById("new-agent-ip");
             if (manualIp && !manualIp.value) manualIp.placeholder = nextIp;
 
+            const isFresh = selectedInstallMode === "fresh";
+            const modeBadge = isFresh 
+                ? `<span class="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/30"><i class="fa-solid fa-sparkles mr-1"></i> Clean Fresh OS</span>`
+                : `<span class="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-blue-500/20 text-blue-400 border border-blue-500/30"><i class="fa-solid fa-clone mr-1"></i> CT 199 Clone</span>`;
+            const modeDesc = isFresh
+                ? `${nextIp} &bull; ${curEngine.minRam} RAM &bull; ${curEngine.minCpu} CPU &bull; Ubuntu 24.04 Official Template`
+                : `${nextIp} &bull; 6 GB RAM &bull; 4 vCPU &bull; Template 199 Clone`;
+            const btnIcon = isFresh ? "fa-sparkles" : "fa-bolt";
+            const btnLabel = isFresh ? `Clean Install & Spin Up CT ${nextVmid}` : `Clone & Spin Up CT ${nextVmid}`;
+
             standbyList.innerHTML = `
                 <div class="p-4 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4" style="background-color: var(--bg-input); border-color: var(--border-base);">
                     <div class="flex items-center space-x-3.5">
@@ -4617,17 +5050,15 @@ Describe the main objective of this capability.
                                 <span class="text-[9px] px-1.5 py-0.2 rounded font-semibold border" style="background:${curEngine.badgeBg}; color:${curEngine.badgeText}; border-color:${curEngine.badgeBorder};">
                                     ${curEngine.name}
                                 </span>
-                                <span class="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                                    <i class="fa-solid fa-cloud-arrow-up mr-1"></i> Auto-Provision
-                                </span>
+                                ${modeBadge}
                             </div>
                             <div class="text-[11px] text-slate-300 font-medium mt-0.5">${suggestedRole}</div>
-                            <div class="text-[10px] text-slate-400 font-mono mt-0.5">${nextIp} &bull; 6 GB RAM &bull; 4 vCPU &bull; Proxmox Base Template</div>
+                            <div class="text-[10px] text-slate-400 font-mono mt-0.5">${modeDesc}</div>
                         </div>
                     </div>
                     <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
                         <button onclick="quickSpinUpStandby('agent-${nextVmid}', '${curEngine.id}', '${suggestedName}', '${suggestedRole}', ${nextVmid}, '${nextIp}', true)" class="px-4 py-2.5 btn-action-primary font-semibold rounded-xl text-xs transition shadow-lg flex items-center gap-2 flex-shrink-0">
-                            <i class="fa-solid fa-bolt"></i> Provision & Spin Up CT ${nextVmid}
+                            <i class="fa-solid ${btnIcon}"></i> ${btnLabel}
                         </button>
                     </div>
                 </div>
@@ -4654,11 +5085,12 @@ Describe the main objective of this capability.
             document.querySelectorAll('#standby-agents-list button').forEach(b => {
                 b.disabled = true;
                 b.classList.add('opacity-50', 'cursor-not-allowed');
-                b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Spinning Up...';
+                b.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Preparing...';
             });
 
             closeAddAgentModal();
             let newAgentId = agentId;
+            let wasProvisioning = false;
             try {
                 const res = await fetch("/api/agents/add", {
                     method: "POST",
@@ -4668,53 +5100,33 @@ Describe the main objective of this capability.
                         role: role,
                         ip: ip,
                         vmid: vmid,
-                        type: engineId
+                        type: engineId,
+                        install_mode: selectedInstallMode
                     })
                 });
                 const data = await res.json();
                 if (data.success) {
                     agents = data.agents;
-                    newAgentId = data.agent.id;  // Use server-assigned ID
+                    newAgentId = data.agent.id;
+                    wasProvisioning = !!data.provisioning;
                 }
                 buildSidebarDom();
                 buildDedicatedIframes();
                 buildOverviewScreensGrid();
                 buildFleetTableDom();
+
+                if (wasProvisioning) {
+                    openProvisionTracker(vmid, engineId, name);
+                } else {
+                    await toggleAgentPower(newAgentId, 'start');
+                    selectView(newAgentId);
+                }
             } catch (e) {
                 console.error("Config update error", e);
+                alert("Failed to provision node: " + e.message);
+            } finally {
                 _spinUpLock = false;
-                return;
             }
-
-            await toggleAgentPower(newAgentId, 'start');
-            selectView(newAgentId);
-
-            // Push engine type to the container once it's online
-            if (engineId !== 'antigravity') {
-                const agent = agents.find(a => a.id === newAgentId);
-                if (agent) {
-                    const pushEngine = async () => {
-                        const bridgeUrl = `http://${agent.ip}:${agent.port || 8000}`;
-                        for (let attempt = 0; attempt < 10; attempt++) {
-                            await new Promise(r => setTimeout(r, 3000));
-                            try {
-                                const res = await fetch(`${bridgeUrl}/configure_engine`, {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ engine_type: engineId, restart_desktop: true })
-                                });
-                                if (res.ok) {
-                                    console.log(`Engine type '${engineId}' pushed to container ${agent.vmid}`);
-                                    return;
-                                }
-                            } catch (e) {}
-                        }
-                    };
-                    pushEngine();
-                }
-            }
-
-            _spinUpLock = false;
         }
 
         let _registerLock = false;
@@ -4740,7 +5152,8 @@ Describe the main objective of this capability.
                         role: role,
                         ip: ip,
                         type: selectedAddEngine,
-                        vm_type: virtType
+                        vm_type: virtType,
+                        install_mode: selectedInstallMode
                     })
                 });
                 const data = await res.json();
@@ -4752,8 +5165,12 @@ Describe the main objective of this capability.
                     buildFleetTableDom();
                     closeAddAgentModal();
                     fetchAllStatus();
-                    selectView(data.agent.id);
-                    if (!data.note) alert(`Agent '${name}' successfully added to Cockpit!`);
+                    if (data.provisioning && data.agent?.vmid) {
+                        openProvisionTracker(data.agent.vmid, selectedAddEngine, name);
+                    } else {
+                        selectView(data.agent.id);
+                        if (!data.note) alert(`Agent '${name}' successfully added to Cockpit!`);
+                    }
                 } else {
                     alert(data.error || "Failed to add agent");
                 }
@@ -4762,6 +5179,120 @@ Describe the main objective of this capability.
             } finally {
                 _registerLock = false;
             }
+        }
+
+        // ============================================================
+        // LIVE PROVISIONING TRACKER & MONITORING LOGIC
+        // ============================================================
+        let _provisionInterval = null;
+        let _provisionTargetAgentId = null;
+        let _provisionStartTime = null;
+
+        function openProvisionTracker(vmid, engineId, name) {
+            const modal = document.getElementById("provision-modal");
+            if (!modal) return;
+            
+            _provisionStartTime = Date.now();
+            _provisionTargetAgentId = `agent-${vmid}`;
+            const matching = agents.find(a => Number(a.vmid) === Number(vmid));
+            if (matching) _provisionTargetAgentId = matching.id;
+
+            const eng = getAgentEngine(engineId);
+            const titleEl = document.getElementById("provision-modal-title");
+            const subEl = document.getElementById("provision-modal-subtitle");
+            const stageEl = document.getElementById("provision-stage-text");
+            const pctEl = document.getElementById("provision-percent-text");
+            const barEl = document.getElementById("provision-progress-bar");
+            const doneBtn = document.getElementById("provision-done-btn");
+            const logsEl = document.getElementById("provision-live-logs");
+            const spinner = document.getElementById("provision-modal-spinner");
+
+            if (titleEl) titleEl.innerText = `Installing ${name || eng.name}`;
+            if (subEl) subEl.innerText = `Node CT ${vmid} • Clean Ubuntu 24.04 OS • ${eng.fullName}`;
+            if (stageEl) { stageEl.innerText = "Creating Ubuntu 24.04 container on Proxmox..."; stageEl.classList.remove("text-rose-400"); }
+            if (pctEl) pctEl.innerText = "15%";
+            if (barEl) barEl.style.width = "15%";
+            if (doneBtn) doneBtn.classList.add("hidden");
+            if (spinner) spinner.classList.add("fa-spin");
+            if (logsEl) logsEl.innerHTML = `<div class="text-amber-400 font-semibold">[INIT] Triggered clean automated provisioning for CT ${vmid} (${eng.name})...</div>`;
+            
+            modal.classList.remove("hidden");
+
+            if (_provisionInterval) clearInterval(_provisionInterval);
+            _provisionInterval = setInterval(() => pollProvisionStatus(vmid), 1500);
+        }
+
+        async function pollProvisionStatus(vmid) {
+            try {
+                const res = await fetch(`/api/agents/provision_status?vmid=${vmid}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const task = data.task;
+                if (!task) return;
+
+                const elapsed = Math.round((Date.now() - _provisionStartTime) / 1000);
+                const timerEl = document.getElementById("provision-timer");
+                if (timerEl) timerEl.innerText = `Elapsed: ${elapsed}s`;
+
+                const stageEl = document.getElementById("provision-stage-text");
+                const pctEl = document.getElementById("provision-percent-text");
+                const barEl = document.getElementById("provision-progress-bar");
+                const logsEl = document.getElementById("provision-live-logs");
+                const spinner = document.getElementById("provision-modal-spinner");
+                const doneBtn = document.getElementById("provision-done-btn");
+
+                if (task.progress && stageEl) {
+                    stageEl.innerText = task.progress;
+                }
+                if (task.percent !== undefined) {
+                    if (pctEl) pctEl.innerText = `${task.percent}%`;
+                    if (barEl) barEl.style.width = `${task.percent}%`;
+                }
+
+                if (task.logs && task.logs.length > 0 && logsEl) {
+                    logsEl.innerHTML = task.logs.map(l => {
+                        const isErr = l.includes("Error") || l.includes("failed") || l.includes("⚠️");
+                        const isSuccess = l.includes("✅");
+                        const col = isErr ? "text-rose-400" : (isSuccess ? "text-emerald-400 font-bold" : "text-slate-300");
+                        return `<div class="${col}">${escapeHtml(l)}</div>`;
+                    }).join("");
+                    logsEl.scrollTop = logsEl.scrollHeight;
+                }
+
+                if (task.status === "ready" || task.status === "warning") {
+                    clearInterval(_provisionInterval);
+                    _provisionInterval = null;
+                    if (spinner) spinner.classList.remove("fa-spin");
+                    if (doneBtn) doneBtn.classList.remove("hidden");
+                    fetchAllStatus();
+                } else if (task.status === "failed") {
+                    clearInterval(_provisionInterval);
+                    _provisionInterval = null;
+                    if (spinner) spinner.classList.remove("fa-spin");
+                    if (stageEl) {
+                        stageEl.innerText = `Failed: ${task.error || 'Check logs'}`;
+                        stageEl.classList.add("text-rose-400");
+                    }
+                }
+            } catch (e) {
+                console.error("Poll provision error", e);
+            }
+        }
+
+        function finishProvisioningView() {
+            closeProvisionModal();
+            if (_provisionTargetAgentId) {
+                selectView(_provisionTargetAgentId);
+            }
+        }
+
+        function closeProvisionModal() {
+            if (_provisionInterval) {
+                clearInterval(_provisionInterval);
+                _provisionInterval = null;
+            }
+            const modal = document.getElementById("provision-modal");
+            if (modal) modal.classList.add("hidden");
         }
 
         // ============================================================
@@ -5029,6 +5560,295 @@ Describe the main objective of this capability.
             }
         }
 
+        function openCommitModal(wsId, wsName) {
+            const idInput = document.getElementById("git-commit-ws-id");
+            const nameLabel = document.getElementById("git-commit-ws-name");
+            const msgInput = document.getElementById("git-commit-message");
+            const fb = document.getElementById("git-commit-feedback");
+            if (idInput) idInput.value = wsId;
+            if (nameLabel) nameLabel.textContent = `Workspace: ${wsName || wsId}`;
+            if (msgInput) msgInput.value = "";
+            if (fb) fb.classList.add("hidden");
+            const modal = document.getElementById("git-commit-modal");
+            if (modal) modal.classList.remove("hidden");
+        }
+
+        function closeGitCommitModal() {
+            const modal = document.getElementById("git-commit-modal");
+            if (modal) modal.classList.add("hidden");
+        }
+
+        async function submitGitCommit() {
+            const wsId = document.getElementById("git-commit-ws-id").value;
+            const message = document.getElementById("git-commit-message").value.trim();
+            const fb = document.getElementById("git-commit-feedback");
+            const btn = document.getElementById("btn-submit-commit");
+            if (!message) {
+                if (fb) {
+                    fb.className = "text-xs font-mono text-rose-400";
+                    fb.textContent = "Please enter a commit message";
+                    fb.classList.remove("hidden");
+                }
+                return;
+            }
+
+            const origHtml = btn.innerHTML;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Committing...`;
+            btn.disabled = true;
+
+            try {
+                const res = await fetch(`/api/workspaces/${wsId}/git_commit`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ message: message })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    closeGitCommitModal();
+                    await fetchWorkspaces();
+                    alert(`Commit successful! ${data.commit ? '[' + data.commit + '] ' : ''}${data.message || ''}`);
+                } else {
+                    if (fb) {
+                        fb.className = "text-xs font-mono text-rose-400";
+                        fb.textContent = data.error || "Commit failed";
+                        fb.classList.remove("hidden");
+                    }
+                }
+            } catch (e) {
+                if (fb) {
+                    fb.className = "text-xs font-mono text-rose-400";
+                    fb.textContent = "Error: " + e.message;
+                    fb.classList.remove("hidden");
+                }
+            } finally {
+                btn.innerHTML = origHtml;
+                btn.disabled = false;
+            }
+        }
+
+        async function pushWorkspaceGit(wsId) {
+            const btn = document.getElementById(`btn-gitpush-${wsId}`);
+            let origHtml = "";
+            if (btn) {
+                origHtml = btn.innerHTML;
+                btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i>`;
+                btn.disabled = true;
+            }
+
+            try {
+                const res = await fetch(`/api/workspaces/${wsId}/git_push`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert(`Git push succeeded! Upstream branch updated: ${data.branch || 'main'}`);
+                    await fetchWorkspaces();
+                } else {
+                    alert(data.error || "Git push failed");
+                }
+            } catch (e) {
+                alert("Git push error: " + e.message);
+            } finally {
+                if (btn) {
+                    btn.innerHTML = origHtml;
+                    btn.disabled = false;
+                }
+            }
+        }
+
+        async function openGitConfigModal() {
+            const modal = document.getElementById("git-config-modal");
+            if (modal) modal.classList.remove("hidden");
+            await loadGitConfigUI();
+        }
+
+        function closeGitConfigModal() {
+            const modal = document.getElementById("git-config-modal");
+            if (modal) modal.classList.add("hidden");
+        }
+
+        async function loadGitConfigUI() {
+            try {
+                const res = await fetch("/api/git/config");
+                const data = await res.json();
+                if (document.getElementById("git-cfg-provider")) document.getElementById("git-cfg-provider").value = data.provider || "github.com";
+                if (document.getElementById("git-cfg-username")) document.getElementById("git-cfg-username").value = data.username || "Antigravity Agent";
+                if (document.getElementById("git-cfg-email")) document.getElementById("git-cfg-email").value = data.email || "agent@antigravity.cockpit";
+                const statusEl = document.getElementById("git-token-status");
+                if (statusEl) {
+                    if (data.has_token) {
+                        statusEl.className = "text-[10px] font-mono text-emerald-400";
+                        statusEl.textContent = `Configured: ${data.token_masked || 'active'}`;
+                    } else {
+                        statusEl.className = "text-[10px] font-mono text-slate-400";
+                        statusEl.textContent = "Not configured";
+                    }
+                }
+                const badge = document.getElementById("nav-git-badge");
+                if (badge) {
+                    badge.textContent = data.has_token ? "Active" : "Git";
+                    if (data.has_token) {
+                        badge.style.color = "#38bdf8";
+                        badge.style.borderColor = "rgba(56, 189, 248, 0.4)";
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to load git config:", e);
+            }
+        }
+
+        async function saveGitConfig() {
+            const token = document.getElementById("git-cfg-token").value.trim();
+            const provider = document.getElementById("git-cfg-provider").value;
+            const username = document.getElementById("git-cfg-username").value.trim();
+            const email = document.getElementById("git-cfg-email").value.trim();
+            const fb = document.getElementById("git-cfg-sync-feedback");
+            const btn = document.getElementById("btn-save-git-cfg");
+
+            const origHtml = btn.innerHTML;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Syncing...`;
+            btn.disabled = true;
+
+            const payload = { provider, username, email };
+            if (token) payload.token = token;
+
+            try {
+                const res = await fetch("/api/git/config", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.success) {
+                    if (fb) {
+                        fb.className = "p-3 rounded-xl text-xs font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/30";
+                        fb.textContent = `Git credentials saved & pushed to ${Object.keys(data.synced_agents || {}).length} agents!`;
+                        fb.classList.remove("hidden");
+                    }
+                    document.getElementById("git-cfg-token").value = "";
+                    await loadGitConfigUI();
+                } else {
+                    if (fb) {
+                        fb.className = "p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-400 border border-rose-500/30";
+                        fb.textContent = data.error || "Save failed";
+                        fb.classList.remove("hidden");
+                    }
+                }
+            } catch (e) {
+                if (fb) {
+                    fb.className = "p-3 rounded-xl text-xs font-mono bg-rose-500/10 text-rose-400 border border-rose-500/30";
+                    fb.textContent = "Error: " + e.message;
+                    fb.classList.remove("hidden");
+                }
+            } finally {
+                btn.innerHTML = origHtml;
+                btn.disabled = false;
+            }
+        }
+
+        function togglePasswordVisibility(inputId) {
+            const inp = document.getElementById(inputId);
+            if (inp) {
+                inp.type = inp.type === "password" ? "text" : "password";
+            }
+        }
+
+        async function openAuthModal() {
+            const modal = document.getElementById("auth-modal");
+            if (modal) modal.classList.remove("hidden");
+            await checkAuthStatus();
+        }
+
+        function closeAuthModal() {
+            const modal = document.getElementById("auth-modal");
+            if (modal) modal.classList.add("hidden");
+        }
+
+        async function checkAuthStatus() {
+            try {
+                const res = await fetch("/api/auth/me");
+                const data = await res.json();
+                const signedInView = document.getElementById("auth-signed-in-view");
+                const loginForm = document.getElementById("auth-login-form");
+                const nameLabel = document.getElementById("auth-user-display-name");
+                const badge = document.getElementById("nav-auth-badge");
+                const userLabel = document.getElementById("nav-auth-user-label");
+
+                if (data.authenticated && data.user) {
+                    if (signedInView) signedInView.classList.remove("hidden");
+                    if (loginForm) loginForm.classList.add("hidden");
+                    if (nameLabel) nameLabel.textContent = `${data.user.name || data.user.username} (${data.user.role || 'user'})`;
+                    if (badge) {
+                        badge.textContent = data.user.username;
+                        badge.style.color = "#818cf8";
+                        badge.style.borderColor = "rgba(129, 140, 248, 0.4)";
+                    }
+                    if (userLabel) userLabel.textContent = data.user.name || data.user.username;
+                } else {
+                    if (signedInView) signedInView.classList.add("hidden");
+                    if (loginForm) loginForm.classList.remove("hidden");
+                    if (badge) {
+                        badge.textContent = "Sign In";
+                        badge.style.color = "";
+                        badge.style.borderColor = "";
+                    }
+                    if (userLabel) userLabel.textContent = "User Auth";
+                }
+            } catch (e) {
+                console.error("Auth check failed:", e);
+            }
+        }
+
+        async function submitLogin() {
+            const username = document.getElementById("auth-input-username").value.trim();
+            const password = document.getElementById("auth-input-password").value.trim();
+            const fb = document.getElementById("auth-login-feedback");
+            const btn = document.getElementById("btn-submit-login");
+
+            const origHtml = btn.innerHTML;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Authenticating...`;
+            btn.disabled = true;
+
+            try {
+                const res = await fetch("/api/auth/login", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    if (fb) fb.classList.add("hidden");
+                    document.getElementById("auth-input-password").value = "";
+                    await checkAuthStatus();
+                    closeAuthModal();
+                } else {
+                    if (fb) {
+                        fb.textContent = data.error || "Login failed";
+                        fb.classList.remove("hidden");
+                    }
+                }
+            } catch (e) {
+                if (fb) {
+                    fb.textContent = "Login error: " + e.message;
+                    fb.classList.remove("hidden");
+                }
+            } finally {
+                btn.innerHTML = origHtml;
+                btn.disabled = false;
+            }
+        }
+
+        async function submitLogout() {
+            try {
+                await fetch("/api/auth/logout", { method: "POST" });
+                await checkAuthStatus();
+            } catch (e) {
+                console.error("Logout error:", e);
+            }
+        }
+
         async function createWorkspaceTemplate(template) {
             const defaultNames = {
                 react: "react_vite_app",
@@ -5171,6 +5991,12 @@ Describe the main objective of this capability.
                                 ${w.source === 'git' || w.git_url ? `
                                     <button onclick="pullWorkspaceGit('${w.id}')" id="btn-gitpull-${w.id}" class="p-1.5 border rounded-lg text-xs text-sky-400 hover:text-white hover:bg-sky-500/20 transition" style="background-color: var(--bg-input); border-color: var(--border-base);" title="Pull latest changes from remote Git repository (git pull)">
                                         <i class="fa-solid fa-code-pull-request"></i>
+                                    </button>
+                                    <button onclick="openCommitModal('${w.id}', '${escapeHtml(w.name)}')" id="btn-gitcommit-${w.id}" class="p-1.5 border rounded-lg text-xs text-emerald-400 hover:text-white hover:bg-emerald-500/20 transition" style="background-color: var(--bg-input); border-color: var(--border-base);" title="Stage and commit changes (git commit)">
+                                        <i class="fa-solid fa-code-commit"></i>
+                                    </button>
+                                    <button onclick="pushWorkspaceGit('${w.id}')" id="btn-gitpush-${w.id}" class="p-1.5 border rounded-lg text-xs text-indigo-400 hover:text-white hover:bg-indigo-500/20 transition" style="background-color: var(--bg-input); border-color: var(--border-base);" title="Push commits to upstream remote (git push)">
+                                        <i class="fa-solid fa-cloud-arrow-up"></i>
                                     </button>
                                 ` : ''}
                                 ${w.git_url ? `
@@ -6064,7 +6890,11 @@ def get_agent_vm_type(agent):
     if not agent:
         return "lxc"
     if isinstance(agent, dict):
-        return agent.get("vm_type") or "lxc"
+        if agent.get("vm_type"):
+            return agent["vm_type"]
+        if agent.get("type") in ["hermes", "openclaw"]:
+            return "qemu"
+        return "lxc"
     return "lxc"
 
 def pve_api_request(method, agent, path_suffix, **kwargs):
@@ -6713,29 +7543,29 @@ def rename_agent_route():
 def remove_agent_route():
     data = request.get_json(force=True, silent=True) or {}
     agent_id = data.get("agent_id") or data.get("id") or request.args.get("agent_id")
-    purge_pve = bool(data.get("purge_pve", False))
+    purge_pve = bool(data.get("purge_pve") or request.args.get("purge_pve") in ["1", "true", "True", True])
     
-    agent = next((a for a in AGENTS if a["id"] == agent_id), None)
+    agent = next((a for a in AGENTS if a.get("id") == agent_id or str(a.get("vmid")) == str(agent_id)), None)
     if not agent:
         return jsonify({"error": "Agent not found"}), 404
     
     # 1. Stop container/VM if running
     vmid = agent.get("vmid")
     if vmid:
-        try:
-            pve_api_request("post", agent, "status/stop", timeout=5)
-        except Exception:
-            pass
-
-        # 2. If purge_pve is explicitly requested
         if purge_pve:
             try:
-                time.sleep(1)
-                pve_api_request("delete", agent, "", timeout=8)
+                print(f"[Purge] Stopping and purging container {vmid} on Proxmox...")
+                run_pve_cmd(f"pct stop {vmid} --skiplock 1 || true", timeout=15)
+                run_pve_cmd(f"pct destroy {vmid} --purge 1 || true", timeout=20)
             except Exception as pe:
                 print(f"Failed to purge node {vmid} on PVE:", pe)
+        else:
+            try:
+                pve_api_request("post", agent, "status/stop", timeout=5)
+            except Exception:
+                pass
     
-    # 3. Remove from AGENTS list and save
+    # 2. Remove from AGENTS list and save
     AGENTS.remove(agent)
     save_agents_config()
     
@@ -6756,18 +7586,36 @@ def fleet_sync_route():
         "next_ip": next_ip
     })
 
+@app.route("/api/agents/provision_status", methods=["GET"])
+def agent_provision_status_route():
+    vmid_param = request.args.get("vmid")
+    if vmid_param:
+        try:
+            vmid = int(vmid_param)
+        except ValueError:
+            vmid = vmid_param
+        task = PROVISION_TASKS.get(vmid)
+        if not task:
+            return jsonify({"found": False, "status": "unknown"}), 404
+        return jsonify({"found": True, "task": task})
+    return jsonify({"success": True, "tasks": PROVISION_TASKS})
+
 @app.route("/api/agents/add", methods=["POST"])
 def add_agent_route():
     data = request.get_json(force=True, silent=True) or {}
-    name = (data.get("name") or "").strip()
-    role = (data.get("role") or "Specialist").strip()
-    agent_type = (data.get("type") or data.get("engine") or "antigravity").strip().lower()
-    vm_type = (data.get("vm_type") or "lxc").strip().lower()
+    name = (data.get("name") or request.args.get("name") or request.form.get("name") or "").strip()
+    role = (data.get("role") or request.args.get("role") or request.form.get("role") or "Specialist").strip()
+    agent_type = (data.get("type") or data.get("engine") or request.args.get("type") or request.args.get("engine") or "antigravity").strip().lower()
+    vm_type = (data.get("vm_type") or request.args.get("vm_type") or "lxc").strip().lower()
     if vm_type not in ["qemu", "lxc"]:
         vm_type = "lxc"
         
-    ip = (data.get("ip") or "").strip()
-    vmid = int(data.get("vmid") or 0)
+    install_mode = (data.get("install_mode") or data.get("mode") or request.args.get("install_mode") or request.args.get("mode") or "fresh").strip().lower()
+    if install_mode not in ["fresh", "clone"]:
+        install_mode = "fresh"
+
+    ip = (data.get("ip") or request.args.get("ip") or "").strip()
+    vmid = int(data.get("vmid") or request.args.get("vmid") or 0)
     if not vmid:
         vmids = [a.get("vmid", 0) for a in AGENTS if a.get("vmid")]
         vmid = max(vmids + [150]) + 1
@@ -6792,37 +7640,33 @@ def add_agent_route():
     except Exception:
         pass
 
+    is_provisioning = False
     if not exists_on_pve and vm_type == "lxc":
-        try:
-            print(f"[Provision] Cloning CT 199 to new CT {vmid} ({agent_type})...")
-            clone_url = f"{PROXMOX_API}/nodes/pve/lxc/199/clone"
-            clone_payload = {
-                "newid": vmid,
-                "hostname": f"agy-{agent_type}-{vmid}",
-                "description": f"{agent_type.title()} Agent: {name} ({role})"
-            }
-            r_clone = requests.post(clone_url, headers={"Authorization": PROXMOX_TOKEN}, json=clone_payload, verify=False, timeout=30)
-            if r_clone.status_code == 200:
-                time.sleep(3.5)
-                cfg_url = f"{PROXMOX_API}/nodes/pve/lxc/{vmid}/config"
-                cfg_payload = {
-                    "net0": f"name=eth0,bridge=vmbr0,firewall=1,gw=192.168.178.1,ip={ip}/24,type=veth"
-                }
-                requests.put(cfg_url, headers={"Authorization": PROXMOX_TOKEN}, json=cfg_payload, verify=False, timeout=10)
-                time.sleep(1)
-                start_url = f"{PROXMOX_API}/nodes/pve/lxc/{vmid}/status/start"
-                requests.post(start_url, headers={"Authorization": PROXMOX_TOKEN}, verify=False, timeout=10)
-        except Exception as pe:
-            print(f"[Provision] Error provisioning container {vmid} on Proxmox:", pe)
-    
+        is_provisioning = True
+        PROVISION_TASKS[vmid] = {
+            "vmid": vmid,
+            "engine": agent_type,
+            "name": name,
+            "mode": install_mode,
+            "status": "provisioning",
+            "percent": 5,
+            "progress": "Initializing provisioning task...",
+            "logs": [f"[{time.strftime('%H:%M:%S')}] Provisioning CT {vmid} ({agent_type}) started (mode={install_mode})."],
+            "started_at": time.time(),
+            "finished_at": None,
+            "error": None
+        }
+        t = threading.Thread(target=provision_agent_worker, args=(vmid, agent_type, name, role, ip, install_mode), daemon=True)
+        t.start()
+
     # Prevent duplicate registrations (same VMID or IP)
     existing_vmid = next((a for a in AGENTS if a.get("vmid") == vmid), None)
     if existing_vmid:
-        return jsonify({"success": True, "agent": existing_vmid, "agents": AGENTS, "note": "Agent with this VMID already registered"})
+        return jsonify({"success": True, "agent": existing_vmid, "agents": AGENTS, "note": "Agent with this VMID already registered", "provisioning": is_provisioning, "task_id": vmid})
     
     existing_ip = next((a for a in AGENTS if a.get("ip") == ip), None)
     if existing_ip:
-        return jsonify({"success": True, "agent": existing_ip, "agents": AGENTS, "note": "Agent with this IP already registered"})
+        return jsonify({"success": True, "agent": existing_ip, "agents": AGENTS, "note": "Agent with this IP already registered", "provisioning": is_provisioning, "task_id": vmid})
     
     # Generate unique agent ID (avoid collisions with existing IDs)
     existing_ids = {a["id"] for a in AGENTS}
@@ -6845,7 +7689,7 @@ def add_agent_route():
     }
     AGENTS.append(new_agent)
     save_agents_config()
-    return jsonify({"success": True, "agent": new_agent, "agents": AGENTS})
+    return jsonify({"success": True, "agent": new_agent, "agents": AGENTS, "provisioning": is_provisioning, "task_id": vmid})
 
 
 # ------------------------------------------------------------------
