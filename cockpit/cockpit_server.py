@@ -1,4 +1,5 @@
-import os, sys, json, time, requests, subprocess, base64, io, tarfile, zipfile, shutil, re
+import os, sys, json, time, requests, subprocess, base64, io, tarfile, zipfile, shutil, re, hashlib, secrets
+from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, send_file, Response
 
 app = Flask(__name__)
@@ -111,9 +112,9 @@ AGENTS_CONFIG_FILE = "/usr/local/share/cockpit/agents_config.json"
 DEFAULT_AGENTS = [
     {"id": "agent-1", "vmid": 151, "name": "Agent 1", "type": "antigravity", "vm_type": "lxc",  "role": "Frontend Specialist", "ip": "192.168.178.169", "port": 8000, "vnc_port": 6080},
     {"id": "agent-2", "vmid": 152, "name": "Agent 2", "type": "antigravity", "vm_type": "lxc",  "role": "Backend Specialist",  "ip": "192.168.178.170", "port": 8000, "vnc_port": 6080},
-    {"id": "agent-3", "vmid": 153, "name": "Codex",   "type": "codex",       "vm_type": "lxc",  "role": "Code Synthesis & Refactor", "ip": "192.168.178.171", "port": 8000, "vnc_port": 6080},
-    {"id": "agent-4", "vmid": 154, "name": "Hermes Agent", "type": "hermes", "vm_type": "qemu", "role": "Reasoning & Function Calling", "ip": "192.168.178.172", "port": 8000, "vnc_port": 6080},
-    {"id": "agent-5", "vmid": 155, "name": "Open Claw", "type": "openclaw",  "vm_type": "qemu", "role": "Autonomous Web Scraper & Crawler", "ip": "192.168.178.173", "port": 8000, "vnc_port": 6080}
+    {"id": "agent-3", "vmid": 153, "name": "Antigravity", "type": "antigravity", "vm_type": "lxc", "role": "Autonomous Pair Programmer", "ip": "192.168.178.171", "port": 8000, "vnc_port": 6080},
+    {"id": "agent-4", "vmid": 156, "name": "Codex (CT 156)", "type": "codex", "vm_type": "lxc", "role": "Code Synthesis & Refactor", "ip": "192.168.178.174", "port": 8000, "vnc_port": 6080},
+    {"id": "agent-5", "vmid": 159, "name": "Hermes Agent (CT 159)", "type": "hermes", "vm_type": "lxc", "role": "Reasoning & Function Calling", "ip": "192.168.178.177", "port": 8000, "vnc_port": 6080}
 ]
 
 AGENTS = list(DEFAULT_AGENTS)
@@ -129,7 +130,7 @@ def load_agents_config():
                         if "type" not in a:
                             a["type"] = "antigravity"
                         if "vm_type" not in a:
-                            a["vm_type"] = "qemu" if a.get("type") in ["hermes", "openclaw"] else "lxc"
+                            a["vm_type"] = "lxc"
                     AGENTS = saved
         except Exception as e:
             print("Failed to load agents_config.json", e)
@@ -137,7 +138,7 @@ def load_agents_config():
         if "type" not in a:
             a["type"] = "antigravity"
         if "vm_type" not in a:
-            a["vm_type"] = "qemu" if a.get("type") in ["hermes", "openclaw"] else "lxc" 
+            a["vm_type"] = "lxc" 
 
 def save_agents_config():
     try:
@@ -146,6 +147,86 @@ def save_agents_config():
             json.dump(AGENTS, f, indent=2)
     except Exception as e:
         print("Failed to save agents_config.json", e)
+
+def sync_fleet_with_proxmox():
+    """Queries Proxmox for all agy-* LXC containers and aligns AGENTS list with real nodes."""
+    global AGENTS
+    try:
+        r = requests.get(f"{PROXMOX_API}/nodes/pve/lxc", headers={"Authorization": PROXMOX_TOKEN}, verify=False, timeout=5)
+        if r.status_code != 200:
+            return AGENTS
+        
+        pve_nodes = r.json().get("data", [])
+        pve_node_map = {int(n["vmid"]): n for n in pve_nodes}
+        
+        # 1. Prune ghost agents whose VMID doesn't exist on Proxmox
+        cleaned_agents = []
+        for a in AGENTS:
+            vmid = a.get("vmid")
+            if vmid and vmid in pve_node_map:
+                a["vm_type"] = "lxc"
+                cleaned_agents.append(a)
+            elif not vmid:
+                cleaned_agents.append(a)
+            else:
+                try:
+                    rq = requests.get(f"{PROXMOX_API}/nodes/pve/qemu/{vmid}/status/current", headers={"Authorization": PROXMOX_TOKEN}, verify=False, timeout=2)
+                    if rq.status_code == 200:
+                        a["vm_type"] = "qemu"
+                        cleaned_agents.append(a)
+                        continue
+                except Exception:
+                    pass
+                print(f"[FleetSync] Pruning non-existent Proxmox VMID {vmid} ({a.get('name')})")
+
+        # 2. Auto-discover unmanaged agy-* containers (excluding 150 cockpit and 199 template)
+        registered_vmids = {a.get("vmid") for a in cleaned_agents}
+        for vmid, node in sorted(pve_node_map.items()):
+            name = node.get("name", "")
+            if name.startswith("agy-") and vmid not in [150, 199] and vmid not in registered_vmids:
+                parts = name.split("-")
+                detected_engine = "antigravity"
+                if len(parts) >= 2 and parts[1] in ["codex", "hermes", "openclaw", "antigravity"]:
+                    detected_engine = parts[1]
+                
+                ip = f"192.168.178.{169 + (vmid - 151)}"
+                try:
+                    rc = requests.get(f"{PROXMOX_API}/nodes/pve/lxc/{vmid}/config", headers={"Authorization": PROXMOX_TOKEN}, verify=False, timeout=3)
+                    if rc.status_code == 200:
+                        net0 = rc.json().get("data", {}).get("net0", "")
+                        match = re.search(r'ip=([0-9\.]+)', net0)
+                        if match and match.group(1) != "dhcp":
+                            ip = match.group(1)
+                except Exception:
+                    pass
+
+                role_defaults = {
+                    "antigravity": "Autonomous Pair Programmer",
+                    "codex": "Code Synthesis & Refactor",
+                    "hermes": "Reasoning & Function Calling",
+                    "openclaw": "Autonomous Web Scraper & Crawler"
+                }
+                new_agent = {
+                    "id": f"agent-{len(cleaned_agents) + 1}",
+                    "vmid": vmid,
+                    "name": f"{detected_engine.title()} (CT {vmid})",
+                    "type": detected_engine,
+                    "vm_type": "lxc",
+                    "role": role_defaults.get(detected_engine, "Specialist"),
+                    "ip": ip,
+                    "port": 8000,
+                    "vnc_port": 6080
+                }
+                cleaned_agents.append(new_agent)
+                registered_vmids.add(vmid)
+                print(f"[FleetSync] Auto-discovered new Proxmox node {vmid} ({name}) -> {ip}")
+
+        AGENTS = cleaned_agents
+        save_agents_config()
+        return AGENTS
+    except Exception as e:
+        print("[FleetSync] Error syncing with Proxmox:", e)
+        return AGENTS
 
 load_agents_config()
 
@@ -167,6 +248,133 @@ except Exception:
 
 WORKSPACES_META_FILE = os.path.join(WORKSPACES_DIR, "workspaces_meta.json")
 WORKSPACES = {}
+
+# ------------------------------------------------------------------
+# GIT CONFIGURATION & CREDENTIALS
+# ------------------------------------------------------------------
+GIT_CONFIG_FILE = os.path.join(WORKSPACES_DIR, "git_config.json")
+GIT_CONFIG = {
+    "token": "",
+    "provider": "github.com",
+    "username": "Antigravity Agent",
+    "email": "agent@antigravity.cockpit",
+    "configured": False
+}
+
+def load_git_config():
+    global GIT_CONFIG
+    if os.path.exists(GIT_CONFIG_FILE):
+        try:
+            with open(GIT_CONFIG_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                GIT_CONFIG.update(loaded)
+        except Exception as e:
+            print("Failed to load git_config.json", e)
+    return GIT_CONFIG
+
+def save_git_config():
+    try:
+        os.makedirs(os.path.dirname(GIT_CONFIG_FILE), exist_ok=True)
+        with open(GIT_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(GIT_CONFIG, f, indent=2)
+        try:
+            os.chmod(GIT_CONFIG_FILE, 0o600)
+        except Exception:
+            pass
+    except Exception as e:
+        print("Failed to save git_config.json", e)
+
+load_git_config()
+
+# ------------------------------------------------------------------
+# USER AUTHENTICATION & SESSION MANAGEMENT
+# ------------------------------------------------------------------
+USERS_FILE = os.path.join(WORKSPACES_DIR, "users.json")
+USERS = {}
+ACTIVE_SESSIONS = {}
+SESSION_MAX_AGE = 7 * 24 * 3600  # 7 days
+
+def hash_password(password, salt=None):
+    if not salt:
+        salt = secrets.token_hex(16)
+    key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
+    return f"{salt}${key.hex()}"
+
+def verify_password(password, stored_hash):
+    try:
+        if not stored_hash or "$" not in stored_hash:
+            return False
+        salt, key = stored_hash.split("$", 1)
+        test_key = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
+        return secrets.compare_digest(key, test_key.hex())
+    except Exception:
+        return False
+
+def save_users():
+    try:
+        os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
+        with open(USERS_FILE, "w", encoding="utf-8") as f:
+            json.dump(USERS, f, indent=2)
+        try:
+            os.chmod(USERS_FILE, 0o600)
+        except Exception:
+            pass
+    except Exception as e:
+        print("Failed to save users.json", e)
+
+def load_users():
+    global USERS
+    USERS = {}
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r", encoding="utf-8") as f:
+                USERS = json.load(f)
+        except Exception as e:
+            print("Failed to load users.json", e)
+
+    if not USERS:
+        admin_pass = os.environ.get("COCKPIT_ADMIN_PASSWORD", "antigravity")
+        USERS["admin"] = {
+            "username": "admin",
+            "password_hash": hash_password(admin_pass),
+            "role": "admin",
+            "name": "System Administrator",
+            "created_at": time.time()
+        }
+        save_users()
+    return USERS
+
+load_users()
+
+def get_current_user():
+    token = request.cookies.get("cockpit_session")
+    if not token and "Authorization" in request.headers:
+        auth_hdr = request.headers.get("Authorization", "")
+        if auth_hdr.startswith("Bearer "):
+            token = auth_hdr.split(" ", 1)[1].strip()
+
+    if not token:
+        return None
+
+    session = ACTIVE_SESSIONS.get(token)
+    if session:
+        if session.get("expires", 0) > time.time():
+            return session
+        else:
+            del ACTIVE_SESSIONS[token]
+
+    return None
+
+def require_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        user = get_current_user()
+        if not user:
+            if os.environ.get("COCKPIT_DISABLE_AUTH", "").lower() in ["1", "true"]:
+                return f(*args, **kwargs)
+            return jsonify({"error": "Unauthorized. Please sign in to Antigravity Cockpit.", "authenticated": False}), 401
+        return f(*args, **kwargs)
+    return decorated
 
 def detect_tech_stack(ws_path):
     indicators = []
@@ -4374,61 +4582,56 @@ Describe the main objective of this capability.
             const standbyList = document.getElementById("standby-agents-list");
             if (!standbyList) return;
 
-            const standardVms = [
-                { vmid: 151, ip: "192.168.178.169" },
-                { vmid: 152, ip: "192.168.178.170" },
-                { vmid: 153, ip: "192.168.178.171" },
-                { vmid: 154, ip: "192.168.178.172" },
-                { vmid: 155, ip: "192.168.178.173" }
-            ];
-
-            // Only show containers that are NOT already registered (by vmid OR ip)
-            const registeredVmids = new Set(agents.map(a => a.vmid));
+            const curEngine = getAgentEngine(selectedAddEngine);
+            const registeredVmids = new Set(agents.map(a => Number(a.vmid)));
             const registeredIps = new Set(agents.map(a => a.ip));
-            const totalStandby = standardVms
-                .filter(v => !registeredVmids.has(v.vmid) && !registeredIps.has(v.ip))
-                .map(u => ({ id: `agent-${u.vmid-150}`, vmid: u.vmid, ip: u.ip, isNew: true }));
 
-            if (totalStandby.length === 0) {
-                standbyList.innerHTML = `
-                    <div class="p-4 rounded-xl border text-center text-slate-400 text-xs" style="background-color: var(--bg-input); border-color: var(--border-base);">
-                        <i class="fa-solid fa-circle-check text-emerald-400 mr-1.5"></i> All provisioned fleet containers are currently running!
-                    </div>
-                `;
-                return;
+            // Dynamically determine next available VMID & IP
+            let nextVmid = 151;
+            while (registeredVmids.has(nextVmid) || [150, 199].includes(nextVmid)) {
+                nextVmid++;
+            }
+            let nextOctet = 169 + (nextVmid - 151);
+            let nextIp = `192.168.178.${nextOctet}`;
+            while (registeredIps.has(nextIp)) {
+                nextOctet++;
+                nextIp = `192.168.178.${nextOctet}`;
             }
 
-            const curEngine = getAgentEngine(selectedAddEngine);
+            const suggestedName = `${curEngine.name} (CT ${nextVmid})`;
+            const suggestedRole = curEngine.defaultRole;
 
-            standbyList.innerHTML = totalStandby.map(a => {
-                const suggestedName = `${curEngine.name} (CT ${a.vmid})`;
-                const suggestedRole = curEngine.defaultRole;
+            // Update manual form fields as well
+            const manualIp = document.getElementById("new-agent-ip");
+            if (manualIp && !manualIp.value) manualIp.placeholder = nextIp;
 
-                return `
-                    <div class="p-3.5 rounded-xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3" style="background-color: var(--bg-input); border-color: var(--border-base);">
-                        <div class="flex items-center space-x-3">
-                            <div class="w-10 h-10 rounded-xl border flex items-center justify-center text-sm flex-shrink-0" style="background-color: var(--bg-sidebar); border-color: var(--border-base); color: ${curEngine.color};">
-                                <i class="${curEngine.icon}"></i>
-                            </div>
-                            <div>
-                                <div class="flex items-center gap-2">
-                                    <span class="text-xs font-bold text-white">CT ${a.vmid}</span>
-                                    <span class="text-[9px] px-1.5 py-0.2 rounded font-semibold border" style="background:${curEngine.badgeBg}; color:${curEngine.badgeText}; border-color:${curEngine.badgeBorder};">
-                                        ${curEngine.name}
-                                    </span>
-                                </div>
-                                <div class="text-[11px] text-slate-300 font-medium">${suggestedRole}</div>
-                                <div class="text-[10px] text-slate-400 font-mono">${a.ip} &bull; 6 GB RAM &bull; 4 vCPU</div>
-                            </div>
+            standbyList.innerHTML = `
+                <div class="p-4 rounded-2xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    <div class="flex items-center space-x-3.5">
+                        <div class="w-11 h-11 rounded-2xl border flex items-center justify-center text-base flex-shrink-0" style="background-color: var(--bg-sidebar); border-color: var(--border-base); color: ${curEngine.color};">
+                            <i class="${curEngine.icon}"></i>
                         </div>
-                        <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
-                            <button onclick="quickSpinUpStandby('${a.id}', '${curEngine.id}', '${suggestedName}', '${suggestedRole}', ${a.vmid}, '${a.ip}', ${a.isNew})" class="px-4 py-2 btn-action-primary font-semibold rounded-xl text-xs transition shadow-lg flex items-center gap-1.5 flex-shrink-0">
-                                <i class="fa-solid fa-bolt"></i> Spin Up as ${curEngine.name}
-                            </button>
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs font-bold text-white">CT ${nextVmid}</span>
+                                <span class="text-[9px] px-1.5 py-0.2 rounded font-semibold border" style="background:${curEngine.badgeBg}; color:${curEngine.badgeText}; border-color:${curEngine.badgeBorder};">
+                                    ${curEngine.name}
+                                </span>
+                                <span class="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                    <i class="fa-solid fa-cloud-arrow-up mr-1"></i> Auto-Provision
+                                </span>
+                            </div>
+                            <div class="text-[11px] text-slate-300 font-medium mt-0.5">${suggestedRole}</div>
+                            <div class="text-[10px] text-slate-400 font-mono mt-0.5">${nextIp} &bull; 6 GB RAM &bull; 4 vCPU &bull; Proxmox Base Template</div>
                         </div>
                     </div>
-                `;
-            }).join("");
+                    <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
+                        <button onclick="quickSpinUpStandby('agent-${nextVmid}', '${curEngine.id}', '${suggestedName}', '${suggestedRole}', ${nextVmid}, '${nextIp}', true)" class="px-4 py-2.5 btn-action-primary font-semibold rounded-xl text-xs transition shadow-lg flex items-center gap-2 flex-shrink-0">
+                            <i class="fa-solid fa-bolt"></i> Provision & Spin Up CT ${nextVmid}
+                        </button>
+                    </div>
+                </div>
+            `;
         }
 
         function openAddAgentModal() {
@@ -5860,7 +6063,9 @@ Describe the main objective of this capability.
 def get_agent_vm_type(agent):
     if not agent:
         return "lxc"
-    return agent.get("vm_type") or ("qemu" if agent.get("type") in ["hermes", "openclaw"] else "lxc")
+    if isinstance(agent, dict):
+        return agent.get("vm_type") or "lxc"
+    return "lxc"
 
 def pve_api_request(method, agent, path_suffix, **kwargs):
     """Executes a Proxmox API call, auto-resolving between QEMU VM and LXC endpoints."""
@@ -6029,7 +6234,12 @@ def dispatch_task_internal(target="agent-1", prompt="", images=None, ws_id=None,
         ws_name = ws.get("name", "Project")
         lang = ws.get("primary_language", "Codebase")
         files_cnt = ws.get("file_count", 0)
-        ws_context = f"[Active Project Workspace]: /home/ubuntu/workspace (Project: {ws_name}, Stack: {lang}, {files_cnt} files)\n"
+        ws_context = (
+            f"[Active Project Workspace]: /home/ubuntu/workspace (Project: {ws_name}, Stack: {lang}, {files_cnt} files)\n"
+            f"[Directives]: Your active working directory is /home/ubuntu/workspace. "
+            f"All file inspections, code edits, terminal commands, builds, and test runs MUST execute within /home/ubuntu/workspace. "
+            f"Do not modify system directories outside this workspace.\n"
+        )
         if "[Active Project Workspace]" not in prompt:
             effective_prompt = f"{ws_context}\n{prompt}" if prompt else f"{ws_context}\nTask: Inspect the active project workspace and report findings."
 
@@ -6531,23 +6741,79 @@ def remove_agent_route():
     
     return jsonify({"success": True, "removed_id": agent_id, "agents": AGENTS})
 
+@app.route("/api/fleet/sync", methods=["GET", "POST"])
+def fleet_sync_route():
+    agents_list = sync_fleet_with_proxmox()
+    vmids = [a.get("vmid", 0) for a in agents_list if a.get("vmid")]
+    next_vmid = max(vmids + [150]) + 1
+    while next_vmid in [150, 199]:
+        next_vmid += 1
+    next_ip = f"192.168.178.{169 + (next_vmid - 151)}"
+    return jsonify({
+        "success": True,
+        "agents": agents_list,
+        "next_vmid": next_vmid,
+        "next_ip": next_ip
+    })
+
 @app.route("/api/agents/add", methods=["POST"])
 def add_agent_route():
     data = request.get_json(force=True, silent=True) or {}
     name = (data.get("name") or "").strip()
     role = (data.get("role") or "Specialist").strip()
     agent_type = (data.get("type") or data.get("engine") or "antigravity").strip().lower()
-    vm_type = (data.get("vm_type") or "").strip().lower()
+    vm_type = (data.get("vm_type") or "lxc").strip().lower()
     if vm_type not in ["qemu", "lxc"]:
-        vm_type = "qemu" if agent_type in ["hermes", "openclaw"] else "lxc"
+        vm_type = "lxc"
         
     ip = (data.get("ip") or "").strip()
-    vmid = int(data.get("vmid") or (150 + len(AGENTS) + 1))
+    vmid = int(data.get("vmid") or 0)
+    if not vmid:
+        vmids = [a.get("vmid", 0) for a in AGENTS if a.get("vmid")]
+        vmid = max(vmids + [150]) + 1
+        while vmid in [150, 199]:
+            vmid += 1
+    
+    if not ip:
+        ip = f"192.168.178.{169 + (vmid - 151)}"
+        
     port = int(data.get("port") or 8000)
     vnc_port = int(data.get("vnc_port") or 6080)
     
-    if not name or not ip:
-        return jsonify({"error": "Name and IP required"}), 400
+    if not name:
+        return jsonify({"error": "Name required"}), 400
+
+    # Auto-provision on Proxmox if container doesn't exist
+    exists_on_pve = False
+    try:
+        r_check = pve_api_request("get", {"vmid": vmid, "vm_type": vm_type}, "status/current")
+        if r_check and r_check.status_code == 200:
+            exists_on_pve = True
+    except Exception:
+        pass
+
+    if not exists_on_pve and vm_type == "lxc":
+        try:
+            print(f"[Provision] Cloning CT 199 to new CT {vmid} ({agent_type})...")
+            clone_url = f"{PROXMOX_API}/nodes/pve/lxc/199/clone"
+            clone_payload = {
+                "newid": vmid,
+                "hostname": f"agy-{agent_type}-{vmid}",
+                "description": f"{agent_type.title()} Agent: {name} ({role})"
+            }
+            r_clone = requests.post(clone_url, headers={"Authorization": PROXMOX_TOKEN}, json=clone_payload, verify=False, timeout=30)
+            if r_clone.status_code == 200:
+                time.sleep(3.5)
+                cfg_url = f"{PROXMOX_API}/nodes/pve/lxc/{vmid}/config"
+                cfg_payload = {
+                    "net0": f"name=eth0,bridge=vmbr0,firewall=1,gw=192.168.178.1,ip={ip}/24,type=veth"
+                }
+                requests.put(cfg_url, headers={"Authorization": PROXMOX_TOKEN}, json=cfg_payload, verify=False, timeout=10)
+                time.sleep(1)
+                start_url = f"{PROXMOX_API}/nodes/pve/lxc/{vmid}/status/start"
+                requests.post(start_url, headers={"Authorization": PROXMOX_TOKEN}, verify=False, timeout=10)
+        except Exception as pe:
+            print(f"[Provision] Error provisioning container {vmid} on Proxmox:", pe)
     
     # Prevent duplicate registrations (same VMID or IP)
     existing_vmid = next((a for a in AGENTS if a.get("vmid") == vmid), None)
@@ -6700,7 +6966,7 @@ def git_clone_workspace():
     ws_name = (data.get("name") or "").strip()
     ws_desc = (data.get("description") or "").strip()
     target_agent = data.get("target_agent", "")
-    token = (data.get("token") or "").strip()
+    token = (data.get("token") or "").strip() or GIT_CONFIG.get("token", "")
 
     if not raw_repo_url:
         return jsonify({"error": "Repository URL or 'owner/repo' shorthand is required"}), 400
@@ -6753,6 +7019,11 @@ def git_clone_workspace():
                     git_commit, git_commit_full, git_commit_msg, git_commit_author, git_commit_date = parts[0], parts[1], parts[2], parts[3], parts[4]
         except Exception:
             pass
+
+        if GIT_CONFIG.get("username"):
+            subprocess.run(["git", "-C", dest_dir, "config", "user.name", GIT_CONFIG["username"]], check=False)
+        if GIT_CONFIG.get("email"):
+            subprocess.run(["git", "-C", dest_dir, "config", "user.email", GIT_CONFIG["email"]], check=False)
 
         stats = scan_workspace_stats(dest_dir)
         ws_obj = {
@@ -6882,6 +7153,216 @@ def git_status_workspace(ws_id):
         "has_changes": bool(status_out),
         "status_summary": status_out
     })
+
+@app.route("/api/git/config", methods=["GET", "POST"])
+def manage_git_config():
+    if request.method == "GET":
+        cfg = load_git_config().copy()
+        tok = cfg.get("token", "")
+        cfg["token_masked"] = f"{tok[:4]}...{tok[-4:]}" if len(tok) > 8 else ("***" if tok else "")
+        cfg["has_token"] = bool(tok)
+        return jsonify(cfg)
+
+    data = request.get_json(force=True, silent=True) or {}
+    token = data.get("token")
+    if token is not None:
+        GIT_CONFIG["token"] = token.strip()
+    if "username" in data:
+        GIT_CONFIG["username"] = (data.get("username") or "").strip() or "Antigravity Agent"
+    if "email" in data:
+        GIT_CONFIG["email"] = (data.get("email") or "").strip() or "agent@antigravity.cockpit"
+    if "provider" in data:
+        GIT_CONFIG["provider"] = (data.get("provider") or "github.com").strip()
+    GIT_CONFIG["configured"] = bool(GIT_CONFIG.get("token") or GIT_CONFIG.get("username"))
+    save_git_config()
+
+    sync_results = {}
+    sync_payload = {
+        "token": GIT_CONFIG.get("token", ""),
+        "username": GIT_CONFIG.get("username", "Antigravity Agent"),
+        "email": GIT_CONFIG.get("email", "agent@antigravity.cockpit"),
+        "provider": GIT_CONFIG.get("provider", "github.com")
+    }
+    for a in AGENTS:
+        try:
+            r = requests.post(f"http://{a['ip']}:{a['port']}/git/credentials", json=sync_payload, timeout=3)
+            sync_results[a["id"]] = r.json()
+        except Exception as e:
+            sync_results[a["id"]] = {"error": str(e)}
+
+    return jsonify({
+        "success": True,
+        "message": "Git configuration saved and synced to agents",
+        "configured": GIT_CONFIG["configured"],
+        "synced_agents": sync_results
+    })
+
+@app.route("/api/workspaces/<ws_id>/git_commit", methods=["POST"])
+def git_commit_workspace(ws_id):
+    if ws_id not in WORKSPACES:
+        load_workspaces()
+    ws = WORKSPACES.get(ws_id)
+    if not ws:
+        return jsonify({"error": "Workspace not found"}), 404
+
+    dest_dir = os.path.join(WORKSPACES_DIR, ws_id)
+    if not os.path.exists(dest_dir) or not os.path.exists(os.path.join(dest_dir, ".git")):
+        return jsonify({"error": "Workspace is not a valid Git repository"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    message = (data.get("message") or "").strip() or f"Update from Cockpit at {time.strftime('%Y-%m-%d %H:%M:%S')}"
+    author = (data.get("author") or GIT_CONFIG.get("username") or "Antigravity Agent").strip()
+    email = (data.get("email") or GIT_CONFIG.get("email") or "agent@antigravity.cockpit").strip()
+
+    try:
+        s_res = subprocess.run(["git", "-C", dest_dir, "status", "-s"], capture_output=True, text=True, timeout=5)
+        if not s_res.stdout.strip():
+            return jsonify({"success": True, "message": "No local changes to commit", "committed": False})
+
+        subprocess.run(["git", "-C", dest_dir, "add", "-A"], check=True, timeout=10)
+        c_cmd = ["git", "-C", dest_dir, "commit", "-m", message, f"--author={author} <{email}>"]
+        c_res = subprocess.run(c_cmd, capture_output=True, text=True, timeout=15)
+        if c_res.returncode != 0:
+            return jsonify({"error": f"Git commit failed: {c_res.stderr or c_res.stdout}"}), 400
+
+        log_res = subprocess.run(["git", "-C", dest_dir, "log", "-1", "--format=%h|%H|%s|%an|%ci"], capture_output=True, text=True, timeout=5)
+        if log_res.returncode == 0 and log_res.stdout.strip():
+            parts = log_res.stdout.strip().split("|")
+            if len(parts) >= 5:
+                ws["git_commit"] = parts[0]
+                ws["git_commit_full"] = parts[1]
+                ws["git_commit_msg"] = parts[2]
+                ws["git_commit_author"] = parts[3]
+                ws["git_commit_date"] = parts[4]
+        ws["updated_at"] = time.time()
+        save_workspaces()
+
+        return jsonify({
+            "success": True,
+            "committed": True,
+            "commit": ws.get("git_commit"),
+            "commit_msg": ws.get("git_commit_msg"),
+            "output": c_res.stdout.strip(),
+            "workspace": ws
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/workspaces/<ws_id>/git_push", methods=["POST"])
+def git_push_workspace(ws_id):
+    if ws_id not in WORKSPACES:
+        load_workspaces()
+    ws = WORKSPACES.get(ws_id)
+    if not ws:
+        return jsonify({"error": "Workspace not found"}), 404
+
+    dest_dir = os.path.join(WORKSPACES_DIR, ws_id)
+    if not os.path.exists(dest_dir) or not os.path.exists(os.path.join(dest_dir, ".git")):
+        return jsonify({"error": "Workspace is not a valid Git repository"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    branch = (data.get("branch") or ws.get("git_branch") or "").strip()
+    remote = (data.get("remote") or "origin").strip()
+    token = (data.get("token") or GIT_CONFIG.get("token") or "").strip()
+
+    try:
+        if not branch:
+            b_res = subprocess.run(["git", "-C", dest_dir, "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, timeout=5)
+            branch = b_res.stdout.strip() if b_res.returncode == 0 else "main"
+
+        cmd = ["git", "-C", dest_dir, "push", remote, branch]
+        if token and ws.get("git_url") and ws.get("git_url").startswith("https://"):
+            clean_url = ws.get("git_url")
+            push_url = clean_url
+            if "github.com" in clean_url:
+                c_part = re.sub(r'https?://([^@]+@)?github\.com/', '', clean_url)
+                push_url = f"https://{token}@github.com/{c_part}"
+            elif "gitlab.com" in clean_url:
+                c_part = re.sub(r'https?://([^@]+@)?gitlab\.com/', '', clean_url)
+                push_url = f"https://oauth2:{token}@gitlab.com/{c_part}"
+            cmd = ["git", "-C", dest_dir, "push", push_url, f"{branch}:{branch}"]
+
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if res.returncode != 0:
+            err_msg = res.stderr or res.stdout
+            if token:
+                err_msg = err_msg.replace(token, "******")
+            return jsonify({"error": f"Git push failed: {err_msg}"}), 400
+
+        out_msg = res.stdout.strip() or res.stderr.strip()
+        if token:
+            out_msg = out_msg.replace(token, "******")
+
+        return jsonify({
+            "success": True,
+            "message": f"Successfully pushed to {remote}/{branch}",
+            "output": out_msg,
+            "branch": branch
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Git push timed out after 60s"}), 504
+    except Exception as e:
+        err_msg = str(e)
+        if token:
+            err_msg = err_msg.replace(token, "******")
+        return jsonify({"error": err_msg}), 500
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_auth_login():
+    data = request.get_json(force=True, silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "").strip()
+
+    if not username or not password:
+        return jsonify({"error": "Username and password required"}), 400
+
+    load_users()
+    user = USERS.get(username)
+    if not user or not verify_password(password, user.get("password_hash", "")):
+        return jsonify({"error": "Invalid username or password"}), 401
+
+    session_token = secrets.token_hex(32)
+    ACTIVE_SESSIONS[session_token] = {
+        "username": username,
+        "name": user.get("name", username),
+        "role": user.get("role", "developer"),
+        "expires": time.time() + SESSION_MAX_AGE
+    }
+
+    resp = jsonify({
+        "success": True,
+        "token": session_token,
+        "user": {
+            "username": username,
+            "name": user.get("name", username),
+            "role": user.get("role", "developer")
+        }
+    })
+    resp.set_cookie("cockpit_session", session_token, max_age=SESSION_MAX_AGE, httponly=True, samesite="Lax")
+    return resp
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_auth_logout():
+    token = request.cookies.get("cockpit_session")
+    if token and token in ACTIVE_SESSIONS:
+        del ACTIVE_SESSIONS[token]
+    resp = jsonify({"success": True, "message": "Signed out"})
+    resp.delete_cookie("cockpit_session")
+    return resp
+
+@app.route("/api/auth/me", methods=["GET"])
+def api_auth_me():
+    user = get_current_user()
+    if user:
+        return jsonify({
+            "authenticated": True,
+            "user": {
+                "username": user.get("username"),
+                "name": user.get("name"),
+                "role": user.get("role")
+            }
+        })
+    return jsonify({"authenticated": False})
 
 @app.route("/api/workspaces/create_template", methods=["POST"])
 def create_workspace_template():

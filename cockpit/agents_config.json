@@ -1,0 +1,57 @@
+[
+  {
+    "id": "agent-1",
+    "vmid": 151,
+    "name": "Agent 1",
+    "role": "Frontend Specialist",
+    "ip": "192.168.178.169",
+    "port": 8000,
+    "vnc_port": 6080,
+    "type": "antigravity",
+    "vm_type": "lxc"
+  },
+  {
+    "id": "agent-2",
+    "vmid": 152,
+    "name": "Agent 2",
+    "role": "Backend Specialist",
+    "ip": "192.168.178.170",
+    "port": 8000,
+    "vnc_port": 6080,
+    "type": "antigravity",
+    "vm_type": "lxc"
+  },
+  {
+    "id": "agent-3",
+    "vmid": 153,
+    "name": "Antigravity",
+    "type": "antigravity",
+    "role": "Autonomous Pair Programmer",
+    "ip": "192.168.178.171",
+    "port": 8000,
+    "vnc_port": 6080,
+    "vm_type": "lxc"
+  },
+  {
+    "id": "agent-4",
+    "vmid": 156,
+    "name": "Codex (CT 156)",
+    "type": "codex",
+    "vm_type": "lxc",
+    "role": "Code Synthesis & Refactor",
+    "ip": "192.168.178.174",
+    "port": 8000,
+    "vnc_port": 6080
+  },
+  {
+    "id": "agent-5",
+    "vmid": 159,
+    "name": "Hermes Agent (CT 159)",
+    "type": "hermes",
+    "vm_type": "lxc",
+    "role": "Reasoning & Function Calling",
+    "ip": "192.168.178.177",
+    "port": 8000,
+    "vnc_port": 6080
+  }
+]
