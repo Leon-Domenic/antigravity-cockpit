@@ -786,6 +786,50 @@ def get_primary_workspace():
             return p
     return "/home/ubuntu/workspace"
 
+def ensure_workspace_agent_binding(primary_ws, ws_name="Active Project"):
+    """
+    Ensure the active workspace is properly bound to Antigravity and agent tools:
+    1. Write .agents/rules/cockpit_workspace.md (Antigravity Customization System)
+    2. Write AGENTS.md and PROJECT.md if missing
+    3. Trigger Antigravity IDE to open/focus /home/ubuntu/workspace
+    """
+    try:
+        rules_dir = os.path.join(primary_ws, ".agents", "rules")
+        os.makedirs(rules_dir, exist_ok=True)
+        rule_file = os.path.join(rules_dir, "cockpit_workspace.md")
+        rule_content = f"""---
+name: cockpit-workspace-context
+description: Enforces that the agent acts within the active Cockpit workspace directory.
+---
+
+# Active Workspace Environment
+- **Workspace Name**: {ws_name}
+- **Workspace Root**: {primary_ws}
+
+## Operational Directives
+1. **Root Directory**: All file creations, edits, linting, tests, and terminal commands must operate inside `{primary_ws}`.
+2. **Relative Paths**: Always resolve relative file references against `{primary_ws}`.
+3. **No Unrelated Modifications**: Do not modify files outside `{primary_ws}` unless explicitly requested.
+"""
+        with open(rule_file, "w", encoding="utf-8") as f:
+            f.write(rule_content)
+
+        agents_md = os.path.join(primary_ws, "AGENTS.md")
+        if not os.path.exists(agents_md):
+            with open(agents_md, "w", encoding="utf-8") as f:
+                f.write(f"# Project Instructions for AI Agents\\n\\nActive workspace: {ws_name}\\nRoot: {primary_ws}\\nExecute all tools and tests inside this workspace directory.\\n")
+    except Exception as e:
+        print(f"[Warning] Failed to write workspace agent rules: {e}")
+
+    try:
+        if os.path.exists("/usr/local/bin/antigravity") or os.path.exists("/home/ubuntu/opt/Antigravity-x64/antigravity"):
+            subprocess.run(
+                ["su", "-", "ubuntu", "-c", f"DISPLAY=:1 /usr/local/bin/antigravity -r {primary_ws}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False
+            )
+    except Exception:
+        pass
+
 @app.route("/workspace/deploy", methods=["POST"])
 def deploy_workspace():
     data = request.get_json(force=True, silent=True) or {}
@@ -857,6 +901,9 @@ def deploy_workspace():
             subprocess.run(["chmod", "-R", "u+rw", "/home/ubuntu/workspace"], check=False)
         except Exception:
             pass
+
+        # Bind workspace to Antigravity and agent configuration
+        ensure_workspace_agent_binding(primary_ws, ws_name)
 
         # Count extracted files
         file_count = 0
@@ -1048,6 +1095,9 @@ def workspace_git_clone():
         except Exception:
             pass
 
+        # Bind workspace to Antigravity and agent configuration
+        ensure_workspace_agent_binding(primary_ws, ws_name)
+
         manifest = {
             "workspace_id": ws_id,
             "workspace_name": ws_name,
@@ -1124,6 +1174,154 @@ def workspace_git_pull():
         })
 
         return jsonify({"success": True, "output": res.stdout.strip()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/git/credentials", methods=["POST"])
+def set_git_credentials():
+    data = request.get_json(force=True, silent=True) or {}
+    token = (data.get("token") or "").strip()
+    username = (data.get("username") or "").strip() or "Antigravity Agent"
+    email = (data.get("email") or "").strip() or "agent@antigravity.cockpit"
+    provider = (data.get("provider") or "github.com").strip()
+
+    errors = []
+    for user in ["root", "ubuntu"]:
+        try:
+            home = "/root" if user == "root" else "/home/ubuntu"
+            if not os.path.exists(home):
+                continue
+
+            if user == "root":
+                subprocess.run(["git", "config", "--global", "user.name", username], check=False)
+                subprocess.run(["git", "config", "--global", "user.email", email], check=False)
+                subprocess.run(["git", "config", "--global", "credential.helper", "store"], check=False)
+            else:
+                subprocess.run(["su", "-", "ubuntu", "-c", f"git config --global user.name '{username}'"], check=False)
+                subprocess.run(["su", "-", "ubuntu", "-c", f"git config --global user.email '{email}'"], check=False)
+                subprocess.run(["su", "-", "ubuntu", "-c", "git config --global credential.helper store"], check=False)
+
+            if token:
+                cred_file = os.path.join(home, ".git-credentials")
+                cred_line = f"https://{username}:{token}@{provider}\n"
+                existing = ""
+                if os.path.exists(cred_file):
+                    with open(cred_file, "r", encoding="utf-8", errors="ignore") as f:
+                        existing = f.read()
+                if f"@{provider}" not in existing:
+                    with open(cred_file, "a+", encoding="utf-8") as f:
+                        f.write(cred_line)
+                try:
+                    os.chmod(cred_file, 0o600)
+                    if user == "ubuntu":
+                        subprocess.run(["chown", "ubuntu:ubuntu", cred_file], check=False)
+                except Exception:
+                    pass
+        except Exception as e:
+            errors.append(f"{user}: {e}")
+
+    LOG_HISTORY.append({
+        "type": "info",
+        "time": time.strftime("%H:%M:%S"),
+        "text": f"🔑 Configured Git credentials for author '{username}' <{email}>"
+    })
+
+    if errors:
+        return jsonify({"success": False, "errors": errors}), 500
+    return jsonify({"success": True, "username": username, "email": email})
+
+@app.route("/workspace/git_commit", methods=["POST"])
+def workspace_git_commit():
+    primary_ws = get_primary_workspace()
+    if not os.path.exists(os.path.join(primary_ws, ".git")):
+        return jsonify({"error": "Active workspace is not a Git repository"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    message = (data.get("message") or "").strip() or f"Update from agent at {time.strftime('%Y-%m-%d %H:%M:%S')}"
+    author_name = (data.get("author_name") or "").strip()
+    author_email = (data.get("author_email") or "").strip()
+
+    try:
+        s_res = subprocess.run(["git", "-C", primary_ws, "status", "--porcelain"], capture_output=True, text=True, timeout=10)
+        if not s_res.stdout.strip():
+            return jsonify({"success": True, "message": "No changes to commit", "committed": False})
+
+        subprocess.run(["git", "-C", primary_ws, "add", "-A"], check=True, timeout=15)
+
+        cmd = ["git", "-C", primary_ws, "commit", "-m", message]
+        if author_name and author_email:
+            cmd.append(f"--author={author_name} <{author_email}>")
+
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        if res.returncode != 0:
+            return jsonify({"error": f"Git commit failed: {res.stderr or res.stdout}"}), 400
+
+        log_res = subprocess.run(["git", "-C", primary_ws, "log", "-1", "--format=%h|%s"], capture_output=True, text=True, timeout=5)
+        commit_info = log_res.stdout.strip()
+
+        LOG_HISTORY.append({
+            "type": "info",
+            "time": time.strftime("%H:%M:%S"),
+            "text": f"🌿 Git commit created: {commit_info}"
+        })
+
+        return jsonify({"success": True, "committed": True, "commit": commit_info, "output": res.stdout.strip()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/workspace/git_push", methods=["POST"])
+def workspace_git_push():
+    primary_ws = get_primary_workspace()
+    if not os.path.exists(os.path.join(primary_ws, ".git")):
+        return jsonify({"error": "Active workspace is not a Git repository"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    branch = (data.get("branch") or "").strip()
+    remote = (data.get("remote") or "origin").strip()
+
+    try:
+        if not branch:
+            b_res = subprocess.run(["git", "-C", primary_ws, "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, timeout=5)
+            branch = b_res.stdout.strip() if b_res.returncode == 0 else "main"
+
+        cmd = ["git", "-C", primary_ws, "push", remote, branch]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if res.returncode != 0:
+            return jsonify({"error": f"Agent Git push failed: {res.stderr or res.stdout}"}), 400
+
+        LOG_HISTORY.append({
+            "type": "info",
+            "time": time.strftime("%H:%M:%S"),
+            "text": f"🌿 Pushed workspace commits to {remote}/{branch}"
+        })
+
+        return jsonify({"success": True, "remote": remote, "branch": branch, "output": res.stdout.strip()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/workspace/git_status", methods=["GET"])
+def workspace_git_status():
+    primary_ws = get_primary_workspace()
+    if not os.path.exists(os.path.join(primary_ws, ".git")):
+        return jsonify({"is_git": False})
+
+    try:
+        b_res = subprocess.run(["git", "-C", primary_ws, "rev-parse", "--abbrev-ref", "HEAD"], capture_output=True, text=True, timeout=5)
+        branch = b_res.stdout.strip() if b_res.returncode == 0 else "main"
+
+        s_res = subprocess.run(["git", "-C", primary_ws, "status", "-s"], capture_output=True, text=True, timeout=5)
+        status_text = s_res.stdout.strip()
+
+        log_res = subprocess.run(["git", "-C", primary_ws, "log", "-1", "--format=%h|%s|%an|%ci"], capture_output=True, text=True, timeout=5)
+        last_commit = log_res.stdout.strip()
+
+        return jsonify({
+            "is_git": True,
+            "branch": branch,
+            "has_changes": bool(status_text),
+            "status_summary": status_text,
+            "last_commit": last_commit
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

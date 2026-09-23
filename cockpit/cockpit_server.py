@@ -427,12 +427,42 @@ def save_git_config():
 load_git_config()
 
 # ------------------------------------------------------------------
-# USER AUTHENTICATION & SESSION MANAGEMENT
+# USER AUTHENTICATION, TIERS & SESSION MANAGEMENT
 # ------------------------------------------------------------------
 USERS_FILE = os.path.join(WORKSPACES_DIR, "users.json")
 USERS = {}
 ACTIVE_SESSIONS = {}
 SESSION_MAX_AGE = 7 * 24 * 3600  # 7 days
+
+PLAN_TIERS = {
+    "starter": {
+        "tier": "starter",
+        "label": "Starter Developer",
+        "badge": "STARTER",
+        "color": "#34d399",
+        "max_agents": 2,
+        "max_workspaces": 3,
+        "description": "Essential single-developer plan with 2 agent slots and 3 workspaces."
+    },
+    "pro": {
+        "tier": "pro",
+        "label": "Professional Team",
+        "badge": "PRO",
+        "color": "#818cf8",
+        "max_agents": 5,
+        "max_workspaces": 10,
+        "description": "Full multi-agent orchestration with 5 agent slots and 10 workspaces."
+    },
+    "enterprise": {
+        "tier": "enterprise",
+        "label": "Enterprise Fleet",
+        "badge": "ENTERPRISE",
+        "color": "#fbbf24",
+        "max_agents": 20,
+        "max_workspaces": 50,
+        "description": "High-throughput autonomous fleet orchestration with 20 agent slots and 50 workspaces."
+    }
+}
 
 def hash_password(password, salt=None):
     if not salt:
@@ -472,16 +502,38 @@ def load_users():
         except Exception as e:
             print("Failed to load users.json", e)
 
+    admin_pass = os.environ.get("COCKPIT_ADMIN_PASSWORD", "antigravity")
     if not USERS:
-        admin_pass = os.environ.get("COCKPIT_ADMIN_PASSWORD", "antigravity")
         USERS["admin"] = {
             "username": "admin",
             "password_hash": hash_password(admin_pass),
             "role": "admin",
             "name": "System Administrator",
+            "tier": "enterprise",
+            "max_agents": 999,
+            "max_workspaces": 999,
             "created_at": time.time()
         }
         save_users()
+    else:
+        updated = False
+        if "admin" in USERS:
+            admin_u = USERS["admin"]
+            if admin_u.get("role") != "admin" or admin_u.get("tier") != "enterprise" or admin_u.get("max_agents", 0) < 999:
+                admin_u["role"] = "admin"
+                admin_u["tier"] = "enterprise"
+                admin_u["max_agents"] = 999
+                admin_u["max_workspaces"] = 999
+                updated = True
+        for uname, udata in USERS.items():
+            if "tier" not in udata:
+                udata["tier"] = "enterprise" if udata.get("role") == "admin" else "starter"
+                tier_info = PLAN_TIERS.get(udata["tier"], PLAN_TIERS["starter"])
+                udata.setdefault("max_agents", 999 if udata.get("role") == "admin" else tier_info["max_agents"])
+                udata.setdefault("max_workspaces", 999 if udata.get("role") == "admin" else tier_info["max_workspaces"])
+                updated = True
+        if updated:
+            save_users()
     return USERS
 
 load_users()
@@ -499,6 +551,15 @@ def get_current_user():
     session = ACTIVE_SESSIONS.get(token)
     if session:
         if session.get("expires", 0) > time.time():
+            # Refresh live properties from USERS
+            username = session.get("username")
+            u = USERS.get(username)
+            if u:
+                session["name"] = u.get("name", username)
+                session["role"] = u.get("role", "developer")
+                session["tier"] = u.get("tier", "starter" if u.get("role") != "admin" else "enterprise")
+                session["max_agents"] = u.get("max_agents", 2 if u.get("role") != "admin" else 999)
+                session["max_workspaces"] = u.get("max_workspaces", 3 if u.get("role") != "admin" else 999)
             return session
         else:
             del ACTIVE_SESSIONS[token]
@@ -512,7 +573,7 @@ def require_auth(f):
         if not user:
             if os.environ.get("COCKPIT_DISABLE_AUTH", "").lower() in ["1", "true"]:
                 return f(*args, **kwargs)
-            return jsonify({"error": "Unauthorized. Please sign in to Antigravity Cockpit.", "authenticated": False}), 401
+            return jsonify({"error": "Unauthorized. Please sign in to Webigo AI Workspaces.", "authenticated": False}), 401
         return f(*args, **kwargs)
     return decorated
 
@@ -724,13 +785,449 @@ def create_workspace_zip(ws_path):
 
 load_workspaces()
 
+AUTH_PAGE_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webigo AI Workspaces | Access Control</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #07090e;
+            color: #f3f4f6;
+            min-height: 100vh;
+        }
+        .font-mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .glass-panel {
+            background: rgba(13, 16, 26, 0.85);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7), 0 0 60px rgba(99, 102, 241, 0.08);
+        }
+        .glow-ambient {
+            position: fixed;
+            border-radius: 50%;
+            filter: blur(120px);
+            pointer-events: none;
+            opacity: 0.25;
+            z-index: 0;
+        }
+        .glow-indigo {
+            top: 5%;
+            left: 15%;
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, #6366f1 0%, rgba(99, 102, 241, 0) 70%);
+        }
+        .glow-emerald {
+            bottom: 5%;
+            right: 15%;
+            width: 450px;
+            height: 450px;
+            background: radial-gradient(circle, #10b981 0%, rgba(16, 185, 129, 0) 70%);
+        }
+        .tier-card {
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            cursor: pointer;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(18, 22, 34, 0.6);
+        }
+        .tier-card:hover {
+            border-color: rgba(129, 140, 248, 0.4);
+            background: rgba(24, 30, 48, 0.8);
+            transform: translateY(-2px);
+        }
+        .tier-card.selected {
+            border-color: #818cf8;
+            background: rgba(99, 102, 241, 0.12);
+            box-shadow: 0 0 25px rgba(99, 102, 241, 0.25);
+        }
+        .btn-glow {
+            background: linear-gradient(135deg, #4f46e5 0%, #3730a3 100%);
+            box-shadow: 0 0 20px rgba(79, 70, 229, 0.4);
+            transition: all 0.2s ease;
+        }
+        .btn-glow:hover {
+            background: linear-gradient(135deg, #6366f1 0%, #4338ca 100%);
+            box-shadow: 0 0 30px rgba(99, 102, 241, 0.6);
+            transform: translateY(-1px);
+        }
+        .btn-glow:active {
+            transform: translateY(0);
+        }
+    </style>
+</head>
+<body class="flex items-center justify-center p-4 relative overflow-x-hidden selection:bg-indigo-500 selection:text-white">
+    <!-- Ambient Glows -->
+    <div class="glow-ambient glow-indigo"></div>
+    <div class="glow-ambient glow-emerald"></div>
+
+    <div class="w-full max-w-lg relative z-10 my-8">
+        <!-- Brand Header -->
+        <div class="text-center mb-6">
+            <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-tr from-indigo-500/20 to-sky-500/20 border border-indigo-500/30 text-indigo-400 text-3xl mb-3 shadow-[0_0_30px_rgba(99,102,241,0.25)]">
+                <i class="fa-solid fa-cloud-bolt"></i>
+            </div>
+            <h1 class="text-2xl font-extrabold text-white tracking-tight flex items-center justify-center gap-2">
+                WEBIGO <span class="text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-indigo-400">AI WORKSPACES</span>
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">Multi-Agent WebOS Cloud Platform & Proxmox Fleet</p>
+            <div class="mt-2.5">
+                <span class="inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full text-[10px] font-mono font-bold bg-indigo-500/10 text-indigo-300 border border-indigo-500/25">
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    MANDATORY ACCESS GATE &bull; PROXMOX CT 150
+                </span>
+            </div>
+        </div>
+
+        <!-- Auth Glass Card -->
+        <div class="glass-panel rounded-3xl overflow-hidden p-6 sm:p-8">
+            <!-- Tabs Switcher -->
+            <div class="flex items-center p-1 rounded-2xl bg-[#090b12] border border-white/5 mb-6 text-xs font-semibold">
+                <button type="button" id="tab-btn-signin" onclick="switchAuthTab('signin')" class="flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 bg-indigo-600 text-white shadow-md">
+                    <i class="fa-solid fa-lock-open"></i> Sign In
+                </button>
+                <button type="button" id="tab-btn-signup" onclick="switchAuthTab('signup')" class="flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 text-slate-400 hover:text-white">
+                    <i class="fa-solid fa-user-plus"></i> Create Account
+                </button>
+            </div>
+
+            <!-- Error Banner -->
+            <div id="auth-alert" class="hidden mb-5 p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 flex items-start gap-3">
+                <i class="fa-solid fa-triangle-exclamation text-rose-400 text-sm mt-0.5 flex-shrink-0"></i>
+                <div id="auth-alert-msg" class="flex-1 leading-relaxed"></div>
+            </div>
+
+            <!-- Success Banner -->
+            <div id="auth-success" class="hidden mb-5 p-3.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300 flex items-start gap-3">
+                <i class="fa-solid fa-circle-check text-emerald-400 text-sm mt-0.5 flex-shrink-0"></i>
+                <div id="auth-success-msg" class="flex-1 leading-relaxed"></div>
+            </div>
+
+            <!-- ========================================== -->
+            <!-- TAB 1: SIGN IN FORM                        -->
+            <!-- ========================================== -->
+            <form id="form-signin" onsubmit="handleSignIn(event)" class="space-y-4">
+                <div class="space-y-1.5">
+                    <label class="block text-xs font-semibold text-slate-300">Username</label>
+                    <div class="relative">
+                        <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500 text-xs">
+                            <i class="fa-solid fa-user"></i>
+                        </span>
+                        <input type="text" id="signin-username" required autocomplete="username" placeholder="admin or developer" value="admin" class="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#090b12] border border-white/10 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition">
+                    </div>
+                </div>
+
+                <div class="space-y-1.5">
+                    <div class="flex items-center justify-between">
+                        <label class="block text-xs font-semibold text-slate-300">Password</label>
+                    </div>
+                    <div class="relative">
+                        <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500 text-xs">
+                            <i class="fa-solid fa-key"></i>
+                        </span>
+                        <input type="password" id="signin-password" required autocomplete="current-password" placeholder="••••••••" class="w-full pl-10 pr-10 py-2.5 rounded-xl bg-[#090b12] border border-white/10 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition">
+                        <button type="button" onclick="togglePasswordVisibility('signin-password', this)" class="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-500 hover:text-slate-300 text-xs">
+                            <i class="fa-regular fa-eye"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="pt-2">
+                    <button type="submit" id="btn-signin-submit" class="w-full py-3 rounded-xl btn-glow font-bold text-xs text-white flex items-center justify-center gap-2 cursor-pointer">
+                        <i class="fa-solid fa-right-to-bracket"></i> Sign In to Cockpit
+                    </button>
+                </div>
+
+                <div class="pt-3 border-t border-white/5 text-[11px] text-slate-400 flex items-center justify-between">
+                    <span>Default Administrator:</span>
+                    <span class="font-mono text-indigo-300 bg-indigo-500/10 px-2 py-0.5 rounded border border-indigo-500/20">admin &bull; antigravity</span>
+                </div>
+            </form>
+
+            <!-- ========================================== -->
+            <!-- TAB 2: SIGN UP FORM WITH PLAN SELECTION     -->
+            <!-- ========================================== -->
+            <form id="form-signup" onsubmit="handleSignUp(event)" class="space-y-4 hidden">
+                <div class="space-y-1.5">
+                    <label class="block text-xs font-semibold text-slate-300">Full Name / Display Name</label>
+                    <div class="relative">
+                        <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500 text-xs">
+                            <i class="fa-solid fa-id-card"></i>
+                        </span>
+                        <input type="text" id="signup-name" required placeholder="e.g. Alex Morgan" class="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#090b12] border border-white/10 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition">
+                    </div>
+                </div>
+
+                <div class="space-y-1.5">
+                    <label class="block text-xs font-semibold text-slate-300">Username</label>
+                    <div class="relative">
+                        <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500 text-xs">
+                            <i class="fa-solid fa-at"></i>
+                        </span>
+                        <input type="text" id="signup-username" required pattern="^[a-zA-Z0-9_\\-]+$" placeholder="e.g. alex_dev" class="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[#090b12] border border-white/10 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition">
+                    </div>
+                    <span class="text-[10px] text-slate-500">Alphanumeric, underscores, hyphens only</span>
+                </div>
+
+                <div class="space-y-1.5">
+                    <label class="block text-xs font-semibold text-slate-300">Password</label>
+                    <div class="relative">
+                        <span class="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500 text-xs">
+                            <i class="fa-solid fa-lock"></i>
+                        </span>
+                        <input type="password" id="signup-password" required minlength="6" placeholder="Min. 6 characters" class="w-full pl-10 pr-10 py-2.5 rounded-xl bg-[#090b12] border border-white/10 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition">
+                        <button type="button" onclick="togglePasswordVisibility('signup-password', this)" class="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-500 hover:text-slate-300 text-xs">
+                            <i class="fa-regular fa-eye"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Plan / Quota Selection -->
+                <div class="space-y-2 pt-1">
+                    <label class="block text-xs font-semibold text-slate-300 flex items-center justify-between">
+                        <span>Select Plan Quota Tier</span>
+                        <span class="text-[10px] font-mono text-indigo-400 font-normal">Controls agent & workspace capacity</span>
+                    </label>
+
+                    <div class="grid grid-cols-3 gap-2.5" id="tier-selector-container">
+                        <!-- Starter Tier -->
+                        <div onclick="selectSignupTier('starter')" id="tier-card-starter" class="tier-card rounded-2xl p-3 flex flex-col justify-between">
+                            <div>
+                                <div class="flex items-center justify-between mb-1.5">
+                                    <span class="text-[10px] font-bold font-mono text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">STARTER</span>
+                                    <i class="fa-regular fa-circle text-slate-500 text-xs" id="tier-radio-starter"></i>
+                                </div>
+                                <h4 class="text-xs font-bold text-white">Starter</h4>
+                            </div>
+                            <div class="mt-3 pt-2 border-t border-white/5 space-y-1 text-[10px] font-mono text-slate-300">
+                                <div><strong class="text-emerald-400">2</strong> Agents</div>
+                                <div><strong class="text-emerald-400">3</strong> Workspaces</div>
+                            </div>
+                        </div>
+
+                        <!-- Pro Tier (Default Selected) -->
+                        <div onclick="selectSignupTier('pro')" id="tier-card-pro" class="tier-card selected rounded-2xl p-3 flex flex-col justify-between">
+                            <div>
+                                <div class="flex items-center justify-between mb-1.5">
+                                    <span class="text-[10px] font-bold font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded border border-indigo-500/20">PRO</span>
+                                    <i class="fa-solid fa-circle-dot text-indigo-400 text-xs" id="tier-radio-pro"></i>
+                                </div>
+                                <h4 class="text-xs font-bold text-white">Pro Team</h4>
+                            </div>
+                            <div class="mt-3 pt-2 border-t border-white/5 space-y-1 text-[10px] font-mono text-slate-300">
+                                <div><strong class="text-indigo-400">5</strong> Agents</div>
+                                <div><strong class="text-indigo-400">10</strong> Workspaces</div>
+                            </div>
+                        </div>
+
+                        <!-- Enterprise Tier -->
+                        <div onclick="selectSignupTier('enterprise')" id="tier-card-enterprise" class="tier-card rounded-2xl p-3 flex flex-col justify-between">
+                            <div>
+                                <div class="flex items-center justify-between mb-1.5">
+                                    <span class="text-[10px] font-bold font-mono text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20">FLEET</span>
+                                    <i class="fa-regular fa-circle text-slate-500 text-xs" id="tier-radio-enterprise"></i>
+                                </div>
+                                <h4 class="text-xs font-bold text-white">Enterprise</h4>
+                            </div>
+                            <div class="mt-3 pt-2 border-t border-white/5 space-y-1 text-[10px] font-mono text-slate-300">
+                                <div><strong class="text-amber-400">20</strong> Agents</div>
+                                <div><strong class="text-amber-400">50</strong> Workspaces</div>
+                            </div>
+                        </div>
+                    </div>
+                    <input type="hidden" id="signup-tier" value="pro">
+                </div>
+
+                <div class="pt-2">
+                    <button type="submit" id="btn-signup-submit" class="w-full py-3 rounded-xl btn-glow font-bold text-xs text-white flex items-center justify-center gap-2 cursor-pointer">
+                        <i class="fa-solid fa-rocket"></i> Create Account & Launch Webigo AI
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <div class="text-center mt-6 text-slate-500 text-[11px] font-mono">
+            Webigo AI Workspaces &bull; Proxmox VE 8.x Native Cluster &bull; CT 150
+        </div>
+    </div>
+
+    <script>
+        let currentTab = 'signin';
+        let selectedTier = 'pro';
+
+        function switchAuthTab(tab) {
+            currentTab = tab;
+            const signinBtn = document.getElementById('tab-btn-signin');
+            const signupBtn = document.getElementById('tab-btn-signup');
+            const signinForm = document.getElementById('form-signin');
+            const signupForm = document.getElementById('form-signup');
+            const alertBox = document.getElementById('auth-alert');
+            const successBox = document.getElementById('auth-success');
+
+            alertBox.classList.add('hidden');
+            successBox.classList.add('hidden');
+
+            if (tab === 'signin') {
+                signinBtn.className = 'flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 bg-indigo-600 text-white shadow-md';
+                signupBtn.className = 'flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 text-slate-400 hover:text-white';
+                signinForm.classList.remove('hidden');
+                signupForm.classList.add('hidden');
+                document.getElementById('signin-password').focus();
+            } else {
+                signupBtn.className = 'flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 bg-indigo-600 text-white shadow-md';
+                signinBtn.className = 'flex-1 py-2.5 rounded-xl transition flex items-center justify-center gap-2 text-slate-400 hover:text-white';
+                signupForm.classList.remove('hidden');
+                signinForm.classList.add('hidden');
+                document.getElementById('signup-name').focus();
+            }
+        }
+
+        function selectSignupTier(tier) {
+            selectedTier = tier;
+            document.getElementById('signup-tier').value = tier;
+            ['starter', 'pro', 'enterprise'].forEach(t => {
+                const card = document.getElementById('tier-card-' + t);
+                const radio = document.getElementById('tier-radio-' + t);
+                if (t === tier) {
+                    card.classList.add('selected');
+                    radio.className = 'fa-solid fa-circle-dot text-indigo-400 text-xs';
+                } else {
+                    card.classList.remove('selected');
+                    radio.className = 'fa-regular fa-circle text-slate-500 text-xs';
+                }
+            });
+        }
+
+        function togglePasswordVisibility(inputId, btn) {
+            const input = document.getElementById(inputId);
+            if (!input) return;
+            const icon = btn.querySelector('i');
+            if (input.type === 'password') {
+                input.type = 'text';
+                icon.className = 'fa-regular fa-eye-slash';
+            } else {
+                input.type = 'password';
+                icon.className = 'fa-regular fa-eye';
+            }
+        }
+
+        function showAlert(msg) {
+            const alertBox = document.getElementById('auth-alert');
+            const alertMsg = document.getElementById('auth-alert-msg');
+            const successBox = document.getElementById('auth-success');
+            successBox.classList.add('hidden');
+            alertMsg.textContent = msg;
+            alertBox.classList.remove('hidden');
+        }
+
+        function showSuccess(msg) {
+            const alertBox = document.getElementById('auth-alert');
+            const successBox = document.getElementById('auth-success');
+            const successMsg = document.getElementById('auth-success-msg');
+            alertBox.classList.add('hidden');
+            successMsg.textContent = msg;
+            successBox.classList.remove('hidden');
+        }
+
+        async function handleSignIn(e) {
+            e.preventDefault();
+            const username = document.getElementById('signin-username').value.trim();
+            const password = document.getElementById('signin-password').value.trim();
+            const btn = document.getElementById('btn-signin-submit');
+            const origHtml = btn.innerHTML;
+
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Authenticating...';
+
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    showSuccess('Welcome back, ' + (data.user?.name || data.user?.username) + '! Launching Cockpit...');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 500);
+                } else {
+                    showAlert(data.error || 'Invalid credentials. Please verify username and password.');
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                }
+            } catch (err) {
+                showAlert('Connection failed: ' + err.message);
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
+        }
+
+        async function handleSignUp(e) {
+            e.preventDefault();
+            const name = document.getElementById('signup-name').value.trim();
+            const username = document.getElementById('signup-username').value.trim().toLowerCase();
+            const password = document.getElementById('signup-password').value.trim();
+            const tier = selectedTier;
+            const btn = document.getElementById('btn-signup-submit');
+            const origHtml = btn.innerHTML;
+
+            if (password.length < 6) {
+                showAlert('Password must be at least 6 characters long.');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Allocating Quota & Account...';
+
+            try {
+                const res = await fetch('/api/auth/signup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, username, password, tier })
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    showSuccess('Account initialized! Your ' + tier.toUpperCase() + ' tier quotas are activated. Entering Cockpit...');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 600);
+                } else {
+                    showAlert(data.error || 'Registration failed.');
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                }
+            } catch (err) {
+                showAlert('Connection failed: ' + err.message);
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en" class="dark" data-theme="onyx-stealth">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Antigravity Multi-Agent Cockpit</title>
+    <title>Webigo AI Workspaces | Multi-Agent Cloud OS</title>
+    <!-- Puter.js v2 SDK (Native Cloud FS, Hosting & Multi-Model AI) -->
+    <script src="https://js.puter.com/v2/"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
@@ -845,14 +1342,15 @@ HTML_TEMPLATE = """
         <!-- Brand Header -->
         <div class="p-4 border-b flex items-center justify-between" style="border-color: var(--border-base);">
             <div class="flex items-center space-x-3">
-                <div class="w-9 h-9 rounded-xl flex items-center justify-center text-white text-base shadow-lg" style="background: var(--brand-gradient);">
-                    <i class="fa-solid fa-brain"></i>
+                <div class="w-9 h-9 rounded-xl flex items-center justify-center text-white text-base shadow-lg bg-gradient-to-tr from-indigo-600 via-purple-600 to-sky-400">
+                    <i class="fa-solid fa-cloud-bolt"></i>
                 </div>
                 <div>
-                    <h1 class="text-sm font-bold tracking-tight text-white flex items-center gap-1.5">
-                        Antigravity Cockpit
+                    <h1 class="text-sm font-extrabold tracking-tight text-white flex items-center gap-1.5">
+                        Webigo <span class="text-transparent bg-clip-text bg-gradient-to-r from-sky-400 to-indigo-400">AI</span>
+                        <span class="text-[9px] px-1.5 py-0.5 rounded-md font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">OS</span>
                     </h1>
-                    <p class="text-[10px] text-slate-400 font-mono">Proxmox PVE Fleet</p>
+                    <p class="text-[10px] text-slate-400 font-mono">Webigo AI Workspaces</p>
                 </div>
             </div>
             <button onclick="fetchAllStatus()" class="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition text-xs" title="Refresh Fleet Status">
@@ -887,6 +1385,15 @@ HTML_TEMPLATE = """
                 </div>
                 <span id="active-count-badge" class="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono" style="background: var(--badge-bg); color: var(--badge-text);">
                     -- Active
+                </span>
+            </button>
+            <button onclick="selectView('webos')" id="nav-btn-webos" class="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl transition text-xs font-semibold border" style="border-color: var(--border-base); background-color: var(--bg-input); color: var(--text-main);" title="Launch Puter WebOS Multi-Window Desktop Mode">
+                <div class="flex items-center gap-2.5">
+                    <i class="fa-solid fa-desktop text-sky-400"></i>
+                    <span>WebOS Desktop</span>
+                </div>
+                <span id="nav-webos-badge" class="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono border" style="background: rgba(14, 165, 233, 0.15); color: #38bdf8; border-color: rgba(14, 165, 233, 0.3);">
+                    Puter OS
                 </span>
             </button>
             <button onclick="openSkillsModal()" id="nav-btn-skills" class="w-full flex items-center justify-between px-3.5 py-2 rounded-xl transition text-xs font-semibold border" style="border-color: var(--border-base); background-color: var(--bg-input); color: var(--text-main);" title="Manage & Inject Agent Skills">
@@ -925,15 +1432,30 @@ HTML_TEMPLATE = """
                     Git
                 </span>
             </button>
-            <button onclick="openAuthModal()" id="nav-btn-auth" class="w-full flex items-center justify-between px-3.5 py-2 rounded-xl transition text-xs font-semibold border" style="border-color: var(--border-base); background-color: var(--bg-input); color: var(--text-main);" title="User Authentication & Security">
-                <div class="flex items-center gap-2.5">
-                    <i class="fa-solid fa-user-shield text-indigo-400"></i>
-                    <span id="nav-auth-user-label">User Auth</span>
+            <div id="nav-user-profile-card" onclick="openAuthModal()" class="w-full p-2.5 rounded-2xl border transition cursor-pointer hover:border-indigo-500/40" style="border-color: var(--border-base); background-color: var(--bg-input);" title="User Account, Quotas & Sign Out">
+                <div class="flex items-center justify-between gap-2 mb-1.5">
+                    <div class="flex items-center gap-2 min-w-0">
+                        <div class="w-7 h-7 rounded-xl flex items-center justify-center text-xs font-bold text-indigo-300 bg-indigo-500/20 border border-indigo-500/30 flex-shrink-0" id="nav-auth-avatar">
+                            <i class="fa-solid fa-user-shield"></i>
+                        </div>
+                        <div class="min-w-0">
+                            <div class="truncate text-xs font-bold text-white leading-tight" id="nav-auth-user-label">Loading...</div>
+                            <div class="text-[10px] text-slate-400 font-mono truncate" id="nav-auth-role-label">developer</div>
+                        </div>
+                    </div>
+                    <span id="nav-auth-badge" class="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono border flex-shrink-0" style="background: rgba(99, 102, 241, 0.15); color: #818cf8; border-color: rgba(99, 102, 241, 0.35);">
+                        PRO
+                    </span>
                 </div>
-                <span id="nav-auth-badge" class="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono border" style="background: var(--badge-bg); color: var(--badge-text); border-color: var(--border-base);">
-                    Account
-                </span>
-            </button>
+                <!-- Quota Indicators -->
+                <div class="flex items-center justify-between text-[10px] font-mono text-slate-300 pt-1.5 border-t border-white/5" id="nav-auth-quota-summary">
+                    <span title="Active Agent Containers"><i class="fa-solid fa-server text-indigo-400"></i> <span id="nav-quota-agents-val">...</span> Ag</span>
+                    <span title="Local Workspaces"><i class="fa-solid fa-folder-tree text-emerald-400"></i> <span id="nav-quota-ws-val">...</span> Ws</span>
+                    <span class="text-rose-400 hover:text-rose-300 ml-1 cursor-pointer font-bold" onclick="event.stopPropagation(); submitLogout();" title="Sign Out of Cockpit">
+                        <i class="fa-solid fa-right-from-bracket"></i>
+                    </span>
+                </div>
+            </div>
         </div>
 
         <!-- Section Label -->
@@ -1248,7 +1770,12 @@ HTML_TEMPLATE = """
                             <h3 class="text-xs font-semibold text-white uppercase tracking-wider flex items-center gap-2">
                                 <i class="fa-solid fa-paper-plane" style="color: var(--highlight-text);"></i> Task Dispatcher
                             </h3>
-                            <span id="dispatcher-target-tag" class="text-[10px] px-2 py-0.5 rounded-full font-mono border" style="background: var(--badge-bg); color: var(--badge-text); border-color: var(--border-base);">Agent 1</span>
+                            <div class="flex items-center gap-2">
+                                <button type="button" onclick="openPuterAiModal('dedicated')" class="px-2 py-0.5 rounded-lg border text-[10px] font-semibold flex items-center gap-1.5 transition text-indigo-300 border-indigo-500/30 bg-indigo-500/10 hover:bg-indigo-500/20" title="Open Puter AI Prompt Copilot (Claude, GPT-4o, Gemini, DeepSeek)">
+                                    <i class="fa-solid fa-wand-magic-sparkles text-indigo-400"></i> Puter AI Copilot
+                                </button>
+                                <span id="dispatcher-target-tag" class="text-[10px] px-2 py-0.5 rounded-full font-mono border" style="background: var(--badge-bg); color: var(--badge-text); border-color: var(--border-base);">Agent 1</span>
+                            </div>
                         </div>
 
                         <!-- Quick Action Prompts -->
@@ -1361,7 +1888,12 @@ HTML_TEMPLATE = """
                     <h3 class="text-sm font-semibold text-white uppercase tracking-wider flex items-center gap-2">
                         <i class="fa-solid fa-bullhorn" style="color: var(--highlight-text);"></i> Global Broadcast Dispatcher
                     </h3>
-                    <span class="text-xs font-mono px-2.5 py-0.5 rounded-full border" style="background: var(--badge-bg); color: var(--badge-text); border-color: var(--border-base);">Sends to all running instances</span>
+                    <div class="flex items-center gap-2">
+                        <button type="button" onclick="openPuterAiModal('broadcast')" class="px-2.5 py-1 rounded-lg border text-[11px] font-semibold flex items-center gap-1.5 transition text-indigo-300 border-indigo-500/30 bg-indigo-500/10 hover:bg-indigo-500/20" title="Open Puter AI Prompt Copilot (Claude, GPT-4o, Gemini, DeepSeek)">
+                            <i class="fa-solid fa-wand-magic-sparkles text-indigo-400"></i> Puter AI Copilot
+                        </button>
+                        <span class="text-xs font-mono px-2.5 py-0.5 rounded-full border" style="background: var(--badge-bg); color: var(--badge-text); border-color: var(--border-base);">Sends to all running instances</span>
+                    </div>
                 </div>
                 <!-- Broadcast Image Attachment Tray -->
                 <div id="broadcast-images-tray" class="hidden px-2 py-2 flex flex-wrap gap-2 items-center rounded-xl border mb-2" style="background-color: var(--bg-input); border-color: var(--border-base);">
@@ -1429,6 +1961,325 @@ HTML_TEMPLATE = """
                 </div>
             </div>
         </div>
+
+        <!-- ============================================================ -->
+        <!-- VIEW 3: WEBOS DESKTOP (PUTER-STYLE MULTI-WINDOW CLOUD OS)     -->
+        <!-- ============================================================ -->
+        <div id="webos-desktop-view" class="flex-1 flex flex-col relative overflow-hidden hidden select-none" style="height: 100vh; background: radial-gradient(ellipse at 20% 20%, #171b2e 0%, #080a12 60%, #040508 100%);">
+            
+            <!-- WebOS Ambient Background Grid & Glow -->
+            <div class="absolute inset-0 pointer-events-none opacity-20" style="background-image: linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px); background-size: 40px 40px;"></div>
+            <div class="absolute top-1/4 right-1/4 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none"></div>
+            <div class="absolute bottom-1/3 left-1/4 w-96 h-96 bg-purple-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+            <!-- WebOS Desktop Icon Grid -->
+            <div id="webos-desktop-icons" class="relative z-10 flex-1 p-6 grid grid-flow-col auto-cols-max grid-rows-6 gap-4 items-start content-start overflow-hidden">
+                <!-- App 1: Agent 1 (Frontend) -->
+                <div onclick="openWebosWindow('agent-1')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-blue-600 to-cyan-400 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-cyan-500/30 transition">
+                        <i class="fa-solid fa-laptop-code"></i>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">Frontend</span>
+                </div>
+
+                <!-- App 2: Agent 2 (Backend) -->
+                <div onclick="openWebosWindow('agent-2')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-emerald-500/30 transition">
+                        <i class="fa-solid fa-server"></i>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">Backend</span>
+                </div>
+
+                <!-- App 3: Agent 3 (Codex) -->
+                <div onclick="openWebosWindow('agent-3')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-purple-600 to-indigo-400 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-purple-500/30 transition">
+                        <i class="fa-solid fa-brain"></i>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">Codex</span>
+                </div>
+
+                <!-- App 4: Agent 4 (Hermes) -->
+                <div onclick="openWebosWindow('agent-4')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-amber-600 to-orange-400 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-amber-500/30 transition">
+                        <i class="fa-solid fa-bolt"></i>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">Hermes</span>
+                </div>
+
+                <!-- App 5: Agent 5 (Open Claw) -->
+                <div onclick="openWebosWindow('agent-5')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-rose-600 to-pink-400 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-rose-500/30 transition">
+                        <i class="fa-solid fa-robot"></i>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">Open Claw</span>
+                </div>
+
+                <!-- App 6: Workspaces Hub -->
+                <div onclick="openWebosWindow('app-workspaces')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-teal-500 to-emerald-400 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-teal-500/30 transition">
+                        <i class="fa-solid fa-folder-tree"></i>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">Workspaces</span>
+                </div>
+
+                <!-- App 7: Puter AI Copilot -->
+                <div onclick="openWebosWindow('app-copilot')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-indigo-500/30 transition">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">AI Copilot</span>
+                </div>
+
+                <!-- App 8: Puter Cloud & Hosting -->
+                <div onclick="openWebosWindow('app-puter-cloud')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-sky-500 to-blue-600 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-sky-500/30 transition">
+                        <i class="fa-solid fa-cloud-bolt"></i>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">Puter Cloud</span>
+                </div>
+
+                <!-- App 9: Fleet Broadcast -->
+                <div onclick="openWebosWindow('app-broadcast')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-amber-500 to-yellow-400 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-amber-500/30 transition">
+                        <i class="fa-solid fa-bullhorn"></i>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">Broadcast</span>
+                </div>
+
+                <!-- App 10: Skills Hub -->
+                <div onclick="openWebosWindow('app-skills')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-violet-600 to-purple-400 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-violet-500/30 transition">
+                        <i class="fa-solid fa-boxes-stacked"></i>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">Skills Hub</span>
+                </div>
+
+                <!-- App 11: CEO Suite -->
+                <div onclick="openWebosWindow('app-ceo')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-yellow-500 to-amber-600 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-amber-500/30 transition">
+                        <span class="text-base">👑</span>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">CEO Suite</span>
+                </div>
+
+                <!-- App 12: Fleet Monitor -->
+                <div onclick="openWebosWindow('app-overview')" class="webos-desktop-icon w-20 flex flex-col items-center gap-1.5 p-2 rounded-2xl hover:bg-white/10 transition cursor-pointer text-center group">
+                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-slate-700 to-slate-900 flex items-center justify-center text-white text-xl shadow-lg group-hover:scale-105 group-hover:shadow-slate-500/30 transition border border-white/10">
+                        <i class="fa-solid fa-gauge-high"></i>
+                    </div>
+                    <span class="text-[11px] font-semibold text-slate-200 group-hover:text-white drop-shadow truncate w-full">Overview</span>
+                </div>
+            </div>
+
+            <!-- WebOS Floating Windows Layer -->
+            <div id="webos-windows-container" class="absolute inset-0 pointer-events-none z-20 overflow-hidden">
+                <!-- Windows dynamically rendered here with pointer-events-auto -->
+            </div>
+
+            <!-- WebOS Start Menu Popup -->
+            <div id="webos-start-menu" class="absolute bottom-14 left-4 z-40 w-80 rounded-3xl glass shadow-2xl border border-white/10 p-4 space-y-4 hidden flex-col">
+                <!-- User Profile Card -->
+                <div class="flex items-center gap-3 p-3 rounded-2xl bg-white/5 border border-white/5">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold text-sm shadow">
+                        <span id="webos-user-avatar">W</span>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                        <h4 id="webos-user-name" class="text-xs font-bold text-white truncate">Developer</h4>
+                        <div class="flex items-center gap-1.5 text-[10px] text-slate-400">
+                            <span id="webos-user-tier" class="font-mono text-indigo-400 font-semibold">Pro Plan</span>
+                            <span>&bull;</span>
+                            <span id="webos-user-role" class="text-slate-400">Active</span>
+                        </div>
+                    </div>
+                    <button onclick="openAuthModal()" class="p-2 text-slate-400 hover:text-white transition text-xs" title="Manage Account">
+                        <i class="fa-solid fa-gear"></i>
+                    </button>
+                </div>
+
+                <!-- Quick Applications Grid -->
+                <div class="space-y-1">
+                    <div class="text-[10px] uppercase font-bold text-slate-400 tracking-wider px-1">Quick Apps</div>
+                    <div class="grid grid-cols-4 gap-2 text-center">
+                        <button onclick="openWebosWindow('app-copilot'); toggleWebosStartMenu();" class="p-2 rounded-xl hover:bg-white/5 transition flex flex-col items-center gap-1">
+                            <i class="fa-solid fa-wand-magic-sparkles text-indigo-400 text-sm"></i>
+                            <span class="text-[10px] text-slate-300">Copilot</span>
+                        </button>
+                        <button onclick="openWebosWindow('app-workspaces'); toggleWebosStartMenu();" class="p-2 rounded-xl hover:bg-white/5 transition flex flex-col items-center gap-1">
+                            <i class="fa-solid fa-folder-tree text-emerald-400 text-sm"></i>
+                            <span class="text-[10px] text-slate-300">Workspaces</span>
+                        </button>
+                        <button onclick="openWebosWindow('app-puter-cloud'); toggleWebosStartMenu();" class="p-2 rounded-xl hover:bg-white/5 transition flex flex-col items-center gap-1">
+                            <i class="fa-solid fa-cloud-bolt text-sky-400 text-sm"></i>
+                            <span class="text-[10px] text-slate-300">Puter</span>
+                        </button>
+                        <button onclick="openWebosWindow('app-broadcast'); toggleWebosStartMenu();" class="p-2 rounded-xl hover:bg-white/5 transition flex flex-col items-center gap-1">
+                            <i class="fa-solid fa-bullhorn text-amber-400 text-sm"></i>
+                            <span class="text-[10px] text-slate-300">Broadcast</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- System Controls -->
+                <div class="pt-2 border-t border-white/5 flex items-center justify-between text-xs text-slate-400">
+                    <button onclick="restartAgentDesktop(); toggleWebosStartMenu();" class="flex items-center gap-1.5 hover:text-white transition">
+                        <i class="fa-solid fa-rotate"></i> Reset GUI
+                    </button>
+                    <button onclick="checkOrLoginPuter(); toggleWebosStartMenu();" id="webos-puter-auth-btn" class="flex items-center gap-1.5 text-sky-400 hover:text-sky-300 transition">
+                        <i class="fa-solid fa-cloud"></i> Puter Auth
+                    </button>
+                </div>
+            </div>
+
+            <!-- WebOS Bottom Taskbar -->
+            <div id="webos-taskbar" class="h-12 border-t flex items-center justify-between px-3 glass z-30 flex-shrink-0" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                
+                <!-- Start Button & Active Window Tabs -->
+                <div class="flex items-center gap-2 overflow-x-auto scrollbar-none flex-1 py-1">
+                    <!-- Start Menu Button -->
+                    <button onclick="toggleWebosStartMenu()" id="webos-start-btn" class="px-3 py-1.5 rounded-xl font-bold text-xs flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg hover:brightness-110 transition flex-shrink-0 cursor-pointer">
+                        <i class="fa-solid fa-cloud-bolt text-sky-300"></i>
+                        <span>Webigo</span>
+                    </button>
+
+                    <div class="h-5 w-px bg-white/10 mx-1 flex-shrink-0"></div>
+
+                    <!-- Dynamic Open Windows in Taskbar -->
+                    <div id="webos-taskbar-tabs" class="flex items-center gap-1.5 flex-1 min-w-0">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+
+                <!-- System Tray -->
+                <div class="flex items-center gap-3 pl-3 flex-shrink-0 text-xs text-slate-400 font-mono">
+                    <div id="webos-puter-tray-badge" onclick="openWebosWindow('app-puter-cloud')" class="flex items-center gap-1 px-2 py-1 rounded-lg border border-sky-500/20 bg-sky-500/10 text-sky-300 cursor-pointer hover:bg-sky-500/20 transition text-[10px]">
+                        <i class="fa-solid fa-cloud text-sky-400"></i>
+                        <span id="webos-tray-puter-user">Puter Cloud</span>
+                    </div>
+
+                    <div class="flex items-center gap-1.5 text-[11px] text-emerald-400">
+                        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                        <span class="hidden sm:inline">PVE Fleet</span>
+                    </div>
+
+                    <div id="webos-clock" class="text-slate-200 font-bold text-[11px]">
+                        12:00:00
+                    </div>
+
+                    <button onclick="minimizeAllWindows()" class="w-4 h-8 border-l border-white/10 hover:bg-white/10 transition rounded-r cursor-pointer" title="Show Desktop">
+                    </button>
+                </div>
+            </div>
+        </div>
+
+    <!-- ============================================================ -->
+    <!-- PUTER AI PROMPT COPILOT MODAL                                -->
+    <!-- ============================================================ -->
+    <div id="puter-ai-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md hidden">
+        <div class="glass w-full max-w-3xl rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh] border" style="background-color: var(--bg-card); border-color: var(--border-base);">
+            <!-- Modal Header -->
+            <div class="px-6 py-4 border-b flex items-center justify-between" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center text-white text-lg shadow-lg">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i>
+                    </div>
+                    <div>
+                        <h2 class="text-base font-bold text-white tracking-tight flex items-center gap-2">
+                            Puter AI Prompt Copilot
+                            <span class="text-[10px] px-2 py-0.5 rounded-full font-mono bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">Free & Multi-Model</span>
+                        </h2>
+                        <p class="text-xs text-slate-400">Generate, refine, and optimize high-precision prompts for your autonomous agents</p>
+                    </div>
+                </div>
+                <button onclick="closePuterAiModal()" class="w-8 h-8 rounded-xl border flex items-center justify-center text-slate-400 hover:text-white transition" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <!-- Body -->
+            <div class="p-6 space-y-4 overflow-y-auto flex-1 scrollbar-thin">
+                <!-- Model Selector & Target -->
+                <div class="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl border" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    <div class="flex items-center gap-2">
+                        <label class="text-xs font-semibold text-slate-400"><i class="fa-solid fa-microchip text-indigo-400 mr-1"></i> AI Model:</label>
+                        <select id="puter-model-select" class="bg-slate-900 border border-white/10 rounded-xl px-3 py-1.5 text-xs font-semibold text-white focus:outline-none">
+                            <option value="claude-3-5-sonnet">Claude 3.5 Sonnet (Anthropic)</option>
+                            <option value="gpt-4o" selected>GPT-4o (OpenAI)</option>
+                            <option value="gpt-4o-mini">GPT-4o Mini (Fast)</option>
+                            <option value="gemini-1.5-flash">Gemini 1.5 Flash (Google)</option>
+                            <option value="deepseek-chat">DeepSeek V3 (DeepSeek)</option>
+                            <option value="deepseek-reasoner">DeepSeek R1 Reasoner (DeepSeek)</option>
+                        </select>
+                    </div>
+                    <div class="flex items-center gap-2 text-xs font-mono text-slate-400">
+                        <span>Target:</span>
+                        <span id="puter-ai-target-badge" class="px-2 py-0.5 rounded-lg bg-indigo-500/20 text-indigo-300 font-bold border border-indigo-500/30">Dedicated Dispatcher</span>
+                    </div>
+                </div>
+
+                <!-- Quick Prompt Presets -->
+                <div class="space-y-1.5">
+                    <span class="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Engineering Presets</span>
+                    <div class="flex flex-wrap gap-2">
+                        <button type="button" onclick="applyPuterPreset('refine')" class="px-3 py-1.5 rounded-xl border text-xs font-medium text-slate-300 hover:text-white hover:bg-white/5 transition" style="border-color: var(--border-base);">
+                            ✨ Refine & Clarify Prompt
+                        </button>
+                        <button type="button" onclick="applyPuterPreset('workorder')" class="px-3 py-1.5 rounded-xl border text-xs font-medium text-slate-300 hover:text-white hover:bg-white/5 transition" style="border-color: var(--border-base);">
+                            📋 Generate Step-by-Step Work Order
+                        </button>
+                        <button type="button" onclick="applyPuterPreset('troubleshoot')" class="px-3 py-1.5 rounded-xl border text-xs font-medium text-slate-300 hover:text-white hover:bg-white/5 transition" style="border-color: var(--border-base);">
+                            🐞 Troubleshoot & Fix Error
+                        </button>
+                        <button type="button" onclick="applyPuterPreset('tests')" class="px-3 py-1.5 rounded-xl border text-xs font-medium text-slate-300 hover:text-white hover:bg-white/5 transition" style="border-color: var(--border-base);">
+                            🧪 Write Comprehensive Tests
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Input Prompt -->
+                <div class="space-y-1.5">
+                    <label class="text-xs font-semibold text-slate-300 flex justify-between">
+                        <span>Your Task or Raw Idea</span>
+                        <span class="text-[10px] text-slate-500 font-normal">Describe what the agent should achieve</span>
+                    </label>
+                    <textarea id="puter-copilot-input" rows="4" placeholder="e.g. Build a modern landing page for a SaaS product with dark mode and pricing table..." class="w-full input-box rounded-2xl p-3.5 text-xs focus:outline-none focus:border-indigo-500"></textarea>
+                </div>
+
+                <div class="flex justify-end">
+                    <button type="button" onclick="generatePuterAiPrompt()" id="btn-puter-generate" class="px-5 py-2.5 rounded-xl font-bold text-xs text-white bg-gradient-to-r from-indigo-600 to-purple-600 shadow-lg hover:brightness-110 transition flex items-center gap-2 cursor-pointer">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> Generate Optimized Agent Prompt
+                    </button>
+                </div>
+
+                <!-- AI Output Preview -->
+                <div id="puter-ai-result-container" class="space-y-2 hidden">
+                    <div class="flex items-center justify-between">
+                        <label class="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
+                            <i class="fa-solid fa-circle-check"></i> Optimized Prompt Ready
+                        </label>
+                        <button type="button" onclick="copyPuterResult()" class="text-[11px] text-slate-400 hover:text-white transition flex items-center gap-1 cursor-pointer">
+                            <i class="fa-regular fa-copy"></i> Copy
+                        </button>
+                    </div>
+                    <textarea id="puter-copilot-output" rows="6" class="w-full input-box font-mono rounded-2xl p-3.5 text-xs text-emerald-300 focus:outline-none focus:border-emerald-500"></textarea>
+                </div>
+            </div>
+
+            <!-- Modal Footer -->
+            <div class="px-6 py-3.5 border-t flex items-center justify-between" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                <div class="text-[11px] text-slate-500 font-mono">
+                    Powered by Puter.js AI Chat Engine
+                </div>
+                <div class="flex items-center gap-2">
+                    <button type="button" onclick="closePuterAiModal()" class="px-4 py-2 rounded-xl border text-xs text-slate-300 hover:bg-white/5 transition" style="border-color: var(--border-base);">
+                        Close
+                    </button>
+                    <button type="button" onclick="insertPuterPromptIntoDispatcher()" id="btn-puter-insert" class="px-5 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 transition shadow flex items-center gap-2 disabled:opacity-50 cursor-pointer" disabled>
+                        <i class="fa-solid fa-arrow-down"></i> Insert into Dispatcher
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- ============================================================ -->
     <!-- SKILLS HUB MODAL                                             -->
@@ -2027,6 +2878,9 @@ HTML_TEMPLATE = """
                 <button onclick="switchWorkspacesTab('matrix')" id="ws-tab-btn-matrix" class="px-4 py-2 border-b-2 border-transparent text-xs font-bold transition text-slate-400 hover:text-white flex items-center gap-2">
                     <i class="fa-solid fa-network-wired text-emerald-400"></i> Agent Mount Matrix
                 </button>
+                <button onclick="switchWorkspacesTab('puter')" id="ws-tab-btn-puter" class="px-4 py-2 border-b-2 border-transparent text-xs font-bold transition text-slate-400 hover:text-white flex items-center gap-2">
+                    <i class="fa-solid fa-cloud-bolt text-sky-400"></i> Puter Cloud & Hosting
+                </button>
             </div>
 
             <!-- Tab 1: Projects Library Content -->
@@ -2343,6 +3197,105 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
+            <!-- Tab 6: Puter Cloud & Hosting Content -->
+            <div id="ws-tab-puter" class="flex-1 overflow-y-auto p-6 space-y-5 scrollbar-thin hidden">
+                <!-- Puter Banner -->
+                <div class="p-4 rounded-2xl border flex flex-wrap items-center justify-between gap-4" style="background: linear-gradient(135deg, rgba(14,165,233,0.1) 0%, rgba(99,102,241,0.05) 100%); border-color: rgba(56,189,248,0.25);">
+                    <div class="flex items-center gap-3">
+                        <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center text-white text-xl shadow-lg">
+                            <i class="fa-solid fa-cloud-bolt"></i>
+                        </div>
+                        <div>
+                            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+                                Puter Cloud Integration
+                                <span id="puter-cloud-status-badge" class="px-2 py-0.5 rounded-full text-[10px] font-mono bg-sky-500/20 text-sky-300 border border-sky-500/30">Ready</span>
+                            </h3>
+                            <p class="text-xs text-slate-400">1-Click deploy your frontend workspaces to <strong class="text-sky-300">.puter.site</strong> and backup projects directly to Puter Cloud Drive</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button type="button" onclick="checkOrLoginPuter()" id="btn-puter-login" class="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 transition shadow flex items-center gap-2">
+                            <i class="fa-solid fa-cloud"></i> <span id="puter-login-btn-text">Connect Puter Account</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 1-Click Hosting Section -->
+                <div class="glass rounded-2xl p-5 border space-y-4" style="border-color: var(--border-base);">
+                    <div class="flex items-center justify-between pb-3 border-b" style="border-color: var(--border-base);">
+                        <div>
+                            <h4 class="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                                <i class="fa-solid fa-globe text-emerald-400"></i> 1-Click Live Web Hosting (puter.hosting)
+                            </h4>
+                            <p class="text-[11px] text-slate-400">Publish your workspace project live to the web on a public HTTPS subdomain</p>
+                        </div>
+                        <span class="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">Free SSL Included</span>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="space-y-1.5">
+                            <label class="text-xs font-semibold text-slate-300">Select Workspace to Host</label>
+                            <select id="puter-host-ws-select" class="w-full input-box rounded-xl p-2.5 text-xs text-white focus:outline-none">
+                                <!-- Populated dynamically -->
+                            </select>
+                        </div>
+                        <div class="space-y-1.5">
+                            <label class="text-xs font-semibold text-slate-300">Subdomain Name</label>
+                            <div class="flex items-center">
+                                <input type="text" id="puter-host-subdomain" placeholder="e.g. my-agent-app" class="flex-1 input-box rounded-l-xl p-2.5 text-xs text-white focus:outline-none">
+                                <span class="px-3 py-2.5 border-y border-r rounded-r-xl text-xs font-mono text-slate-400 bg-black/30" style="border-color: var(--border-base);">.puter.site</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between pt-2">
+                        <div id="puter-hosting-status" class="text-xs font-mono text-slate-400"></div>
+                        <button type="button" onclick="deployWorkspaceLiveToPuter()" id="btn-deploy-puter-site" class="px-5 py-2.5 rounded-xl font-bold text-xs text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:brightness-110 transition shadow flex items-center gap-2 cursor-pointer">
+                            <i class="fa-solid fa-rocket"></i> Publish Live to Puter.site
+                        </button>
+                    </div>
+
+                    <!-- Live Site Success Alert -->
+                    <div id="puter-site-live-alert" class="hidden p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between gap-3">
+                        <div class="flex items-center gap-3">
+                            <i class="fa-solid fa-circle-check text-emerald-400 text-lg"></i>
+                            <div>
+                                <div class="text-xs font-bold text-white">Site Published Successfully!</div>
+                                <a id="puter-site-live-link" href="#" target="_blank" class="text-xs font-mono text-emerald-300 hover:underline"></a>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button type="button" onclick="copyPuterSiteUrl()" class="px-3 py-1.5 rounded-lg border border-emerald-500/30 text-xs text-emerald-300 hover:bg-emerald-500/10 cursor-pointer">Copy Link</button>
+                            <a id="puter-site-open-btn" href="#" target="_blank" class="px-3 py-1.5 rounded-lg bg-emerald-600 text-xs text-white font-bold hover:bg-emerald-500">Visit Site <i class="fa-solid fa-arrow-up-right-from-square ml-1"></i></a>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Puter Cloud Drive Sync Section -->
+                <div class="glass rounded-2xl p-5 border space-y-4" style="border-color: var(--border-base);">
+                    <div class="flex items-center justify-between pb-3 border-b" style="border-color: var(--border-base);">
+                        <div>
+                            <h4 class="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                                <i class="fa-solid fa-hard-drive text-sky-400"></i> Puter Cloud Drive Sync (puter.fs)
+                            </h4>
+                            <p class="text-[11px] text-slate-400">Backup your local workspace repositories to Puter Cloud storage</p>
+                        </div>
+                    </div>
+
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                        <div class="flex items-center gap-3">
+                            <select id="puter-sync-ws-select" class="input-box rounded-xl p-2 text-xs text-white focus:outline-none min-w-[220px]">
+                                <!-- Populated dynamically -->
+                            </select>
+                            <button type="button" onclick="backupWorkspaceToPuterFs()" id="btn-sync-to-puter" class="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 transition shadow flex items-center gap-2 cursor-pointer">
+                                <i class="fa-solid fa-cloud-arrow-up"></i> Push to Puter Drive
+                            </button>
+                        </div>
+                        <div id="puter-sync-feedback" class="text-xs font-mono text-slate-400"></div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Modal Footer -->
             <div class="px-6 py-3 border-t flex justify-between items-center" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
                 <div class="text-[11px] text-slate-400 flex items-center gap-2">
@@ -2453,7 +3406,7 @@ HTML_TEMPLATE = """
             <!-- Explorer Footer -->
             <div class="px-6 py-2 border-t flex justify-between items-center text-xs" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
                 <span class="text-[11px] text-slate-400 font-mono" id="explorer-footer-path">Ready</span>
-                <span class="text-[11px] text-slate-500 font-mono">Antigravity Cockpit Code Inspector</span>
+                <span class="text-[11px] text-slate-500 font-mono">Webigo AI Workspaces Code Inspector</span>
             </div>
         </div>
     </div>
@@ -2862,7 +3815,7 @@ HTML_TEMPLATE = """
     </div>
 
     <!-- ============================================================ -->
-    <!-- USER AUTHENTICATION MODAL                                    -->
+    <!-- USER AUTHENTICATION & QUOTAS MODAL                         -->
     <!-- ============================================================ -->
     <div id="auth-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md hidden">
         <div class="glass w-full max-w-md rounded-3xl overflow-hidden shadow-2xl flex flex-col border" style="background-color: var(--bg-card); border-color: var(--border-base);">
@@ -2872,8 +3825,8 @@ HTML_TEMPLATE = """
                         <i class="fa-solid fa-user-shield"></i>
                     </div>
                     <div>
-                        <h2 class="text-base font-bold text-white tracking-tight">Cockpit Authentication</h2>
-                        <p class="text-xs text-slate-400">Access control & multi-agent system security</p>
+                        <h2 class="text-base font-bold text-white tracking-tight">Account & Quotas</h2>
+                        <p class="text-xs text-slate-400">Subscription plan & resource allocation</p>
                     </div>
                 </div>
                 <button onclick="closeAuthModal()" class="w-8 h-8 rounded-xl border flex items-center justify-center text-slate-400 hover:text-white transition" style="background-color: var(--bg-input); border-color: var(--border-base);">
@@ -2882,34 +3835,62 @@ HTML_TEMPLATE = """
             </div>
 
             <div class="p-6 space-y-4">
-                <div id="auth-signed-in-view" class="space-y-4 hidden">
-                    <div class="p-4 rounded-2xl border text-center space-y-2" style="background-color: var(--bg-input); border-color: var(--border-base);">
-                        <div class="w-12 h-12 rounded-full mx-auto flex items-center justify-center text-xl bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                            <i class="fa-solid fa-user-check"></i>
+                <div id="auth-signed-in-view" class="space-y-4">
+                    <div class="p-4 rounded-2xl border text-center space-y-2 relative overflow-hidden" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                        <div class="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center text-2xl bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shadow-inner">
+                            <i class="fa-solid fa-user-astronaut"></i>
                         </div>
-                        <h4 class="text-sm font-bold text-white" id="auth-user-display-name">Administrator</h4>
-                        <div class="text-[11px] font-mono text-emerald-400">● Session Active</div>
+                        <div>
+                            <h4 class="text-sm font-bold text-white" id="auth-user-display-name">Administrator</h4>
+                            <div class="text-[11px] font-mono text-slate-400" id="auth-user-username-display">@admin</div>
+                        </div>
+                        <div class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold font-mono" id="auth-user-plan-badge" style="background: rgba(99, 102, 241, 0.15); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.3);">
+                            PRO TIER
+                        </div>
                     </div>
-                    <button type="button" onclick="submitLogout()" class="w-full py-2.5 rounded-xl border text-xs font-semibold text-rose-300 hover:bg-rose-500/10 transition border-rose-500/30 flex items-center justify-center gap-2">
-                        <i class="fa-solid fa-right-from-bracket"></i> Sign Out
-                    </button>
-                </div>
 
-                <div id="auth-login-form" class="space-y-3">
-                    <div class="space-y-1">
-                        <label class="text-xs font-semibold text-slate-300">Username</label>
-                        <input type="text" id="auth-input-username" value="admin" class="w-full px-3.5 py-2.5 rounded-xl border text-xs text-white placeholder-slate-500 focus:outline-none" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                    <!-- Quota Breakdown Cards -->
+                    <div class="space-y-3">
+                        <div class="p-3.5 rounded-2xl border space-y-2" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <div class="flex items-center justify-between text-xs">
+                                <span class="font-semibold text-slate-200 flex items-center gap-2">
+                                    <i class="fa-solid fa-server text-indigo-400"></i> AI Agent Slots
+                                </span>
+                                <span class="font-mono font-bold text-indigo-300" id="auth-modal-agents-ratio">0 / 5</span>
+                            </div>
+                            <div class="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                                <div id="auth-modal-agents-bar" class="h-full bg-indigo-500 rounded-full transition-all duration-500" style="width: 0%;"></div>
+                            </div>
+                            <div class="text-[10px] text-slate-400 flex justify-between font-mono">
+                                <span>Allocated Containers</span>
+                                <span id="auth-modal-agents-pct">0% Used</span>
+                            </div>
+                        </div>
+
+                        <div class="p-3.5 rounded-2xl border space-y-2" style="background-color: var(--bg-input); border-color: var(--border-base);">
+                            <div class="flex items-center justify-between text-xs">
+                                <span class="font-semibold text-slate-200 flex items-center gap-2">
+                                    <i class="fa-solid fa-folder-tree text-emerald-400"></i> Workspaces
+                                </span>
+                                <span class="font-mono font-bold text-emerald-300" id="auth-modal-ws-ratio">0 / 10</span>
+                            </div>
+                            <div class="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                                <div id="auth-modal-ws-bar" class="h-full bg-emerald-500 rounded-full transition-all duration-500" style="width: 0%;"></div>
+                            </div>
+                            <div class="text-[10px] text-slate-400 flex justify-between font-mono">
+                                <span>Projects & Codebases</span>
+                                <span id="auth-modal-ws-pct">0% Used</span>
+                            </div>
+                        </div>
                     </div>
-                    <div class="space-y-1">
-                        <label class="text-xs font-semibold text-slate-300">Password</label>
-                        <input type="password" id="auth-input-password" placeholder="••••••••" class="w-full px-3.5 py-2.5 rounded-xl border text-xs text-white placeholder-slate-500 focus:outline-none" style="background-color: var(--bg-input); border-color: var(--border-base);">
-                    </div>
-                    <div id="auth-login-feedback" class="text-xs text-rose-400 font-mono hidden"></div>
-                    <button type="button" onclick="submitLogin()" id="btn-submit-login" class="w-full py-2.5 btn-action-primary rounded-xl text-xs font-bold text-white flex items-center justify-center gap-2 shadow mt-2">
-                        <i class="fa-solid fa-lock-open"></i> Sign In to Cockpit
-                    </button>
-                    <div class="pt-2 border-t text-[11px] text-slate-400 leading-relaxed" style="border-color: var(--border-base);">
-                        <span class="font-semibold text-slate-300">Default Credentials:</span> <code class="font-mono text-indigo-300">admin</code> / <code class="font-mono text-indigo-300">antigravity</code>. Bearer tokens from NextAuth or Zitadel OIDC are verified automatically.
+
+                    <div class="pt-2 flex items-center gap-2">
+                        <button type="button" onclick="submitLogout()" class="flex-1 py-2.5 rounded-xl border text-xs font-semibold text-rose-300 hover:bg-rose-500/10 transition border-rose-500/30 flex items-center justify-center gap-2 cursor-pointer">
+                            <i class="fa-solid fa-right-from-bracket"></i> Sign Out
+                        </button>
+                        <button type="button" onclick="closeAuthModal()" class="flex-1 py-2.5 rounded-xl border text-xs font-semibold text-slate-300 hover:bg-white/5 transition border-slate-700 flex items-center justify-center gap-2 cursor-pointer">
+                            Close
+                        </button>
                     </div>
                 </div>
             </div>
@@ -3023,11 +4004,647 @@ HTML_TEMPLATE = """
             }
         }
 
+        /* ============================================================ */
+        /* PUTER.JS NATIVE INTEGRATION & CLOUD ENGINE                   */
+        /* ============================================================ */
+        let puterUser = null;
+        let activePuterAiTarget = "dedicated";
+
+        async function initPuter() {
+            try {
+                if (typeof puter !== "undefined" && puter.auth) {
+                    const signedIn = await puter.auth.isSignedIn();
+                    if (signedIn) {
+                        puterUser = await puter.auth.getUser();
+                        updatePuterUI();
+                    }
+                }
+            } catch (err) {
+                console.warn("[Puter] Init check:", err);
+            }
+        }
+
+        async function checkOrLoginPuter() {
+            if (typeof puter === "undefined") {
+                alert("Puter SDK is loading or unavailable. Check your internet connection.");
+                return;
+            }
+            try {
+                if (await puter.auth.isSignedIn()) {
+                    puterUser = await puter.auth.getUser();
+                    alert("Connected to Puter as " + (puterUser.username || "User") + "!");
+                } else {
+                    await puter.auth.signIn();
+                    puterUser = await puter.auth.getUser();
+                }
+                updatePuterUI();
+            } catch (err) {
+                alert("Puter authentication failed: " + err.message);
+            }
+        }
+
+        async function signoutPuter() {
+            if (typeof puter !== "undefined" && puter.auth) {
+                await puter.auth.signOut();
+                puterUser = null;
+                updatePuterUI();
+            }
+        }
+
+        function updatePuterUI() {
+            const trayUser = document.getElementById("webos-tray-puter-user");
+            const btnText = document.getElementById("puter-login-btn-text");
+            const statusBadge = document.getElementById("puter-cloud-status-badge");
+            const authBtn = document.getElementById("webos-puter-auth-btn");
+
+            if (puterUser) {
+                const name = puterUser.username || "Puter Connected";
+                if (trayUser) trayUser.textContent = name;
+                if (btnText) btnText.textContent = "Connected: " + name;
+                if (statusBadge) {
+                    statusBadge.textContent = "Online (" + name + ")";
+                    statusBadge.className = "px-2 py-0.5 rounded-full text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+                }
+                if (authBtn) authBtn.innerHTML = `<i class="fa-solid fa-cloud-check text-emerald-400"></i> ${escapeHtml(name)}`;
+            } else {
+                if (trayUser) trayUser.textContent = "Puter Cloud";
+                if (btnText) btnText.textContent = "Connect Puter Account";
+                if (statusBadge) {
+                    statusBadge.textContent = "Guest Mode";
+                    statusBadge.className = "px-2 py-0.5 rounded-full text-[10px] font-mono bg-sky-500/20 text-sky-300 border border-sky-500/30";
+                }
+                if (authBtn) authBtn.innerHTML = `<i class="fa-solid fa-cloud text-sky-400"></i> Puter Auth`;
+            }
+        }
+
+        function openPuterAiModal(target) {
+            activePuterAiTarget = target || "dedicated";
+            const targetBadge = document.getElementById("puter-ai-target-badge");
+            if (targetBadge) {
+                targetBadge.textContent = activePuterAiTarget === "broadcast" ? "Global Broadcast" : "Dedicated Dispatcher";
+            }
+            const modal = document.getElementById("puter-ai-modal");
+            if (modal) modal.classList.remove("hidden");
+            const input = document.getElementById("puter-copilot-input");
+            if (input) {
+                const sourceEl = activePuterAiTarget === "broadcast"
+                    ? document.getElementById("broadcast-prompt-input")
+                    : document.getElementById("dedicated-prompt-input");
+                if (sourceEl && sourceEl.value.trim() && !input.value.trim()) {
+                    input.value = sourceEl.value.trim();
+                }
+                input.focus();
+            }
+        }
+
+        function closePuterAiModal() {
+            const modal = document.getElementById("puter-ai-modal");
+            if (modal) modal.classList.add("hidden");
+        }
+
+        function applyPuterPreset(presetType) {
+            const input = document.getElementById("puter-copilot-input");
+            if (!input) return;
+            const current = input.value.trim();
+            if (presetType === "refine") {
+                input.value = current ? `Refine and optimize this prompt for an autonomous developer agent to execute autonomously: "${current}"` : "Analyze this repository codebase, identify performance bottlenecks or untested endpoints, and propose a clean implementation plan.";
+            } else if (presetType === "workorder") {
+                input.value = current ? `Break down this feature into an executive step-by-step work order for our AI agents: "${current}"` : "Create a production-ready REST API with SQLite database, authentication middleware, error handling, and unit test suite.";
+            } else if (presetType === "troubleshoot") {
+                input.value = current ? `Diagnose and provide a patch for this error: "${current}"` : "Inspect the latest build logs or failing tests, trace the root cause, and implement a targeted fix.";
+            } else if (presetType === "tests") {
+                input.value = current ? `Write a comprehensive test suite (unit + e2e) covering: "${current}"` : "Write end-to-end integration tests using pytest/vitest covering all core API routes and edge cases.";
+            }
+        }
+
+        async function generatePuterAiPrompt() {
+            const input = document.getElementById("puter-copilot-input");
+            const modelSelect = document.getElementById("puter-model-select");
+            const generateBtn = document.getElementById("btn-puter-generate");
+            const resultBox = document.getElementById("puter-ai-result-container");
+            const outputArea = document.getElementById("puter-copilot-output");
+            const insertBtn = document.getElementById("btn-puter-insert");
+
+            const rawPrompt = input ? input.value.trim() : "";
+            if (!rawPrompt) {
+                alert("Please enter a task or idea for the AI Copilot to refine.");
+                return;
+            }
+
+            const model = modelSelect ? modelSelect.value : "gpt-4o";
+            const origText = generateBtn.innerHTML;
+            generateBtn.disabled = true;
+            generateBtn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Generating with ${model}...`;
+
+            const systemPrompt = "You are Webigo AI Copilot, an elite prompt engineer for autonomous AI coding agents in Proxmox containers. Given a user request, format a precise, concise, and immediately actionable instruction set that the agent can execute without ambiguity. Output only the prompt ready for dispatch.";
+
+            try {
+                let responseText = "";
+                if (typeof puter !== "undefined" && puter.ai && puter.ai.chat) {
+                    const fullPrompt = `${systemPrompt}\n\nTask: ${rawPrompt}`;
+                    const resp = await puter.ai.chat(fullPrompt, { model: model });
+                    responseText = typeof resp === "string" ? resp : (resp?.message?.content || resp?.text || JSON.stringify(resp));
+                } else {
+                    responseText = `[Webigo AI Workorder]\nGoal: ${rawPrompt}\n\nTasks:\n1. Inspect active workspace structure and identify target files.\n2. Implement the required modifications preserving code standards.\n3. Run automated tests and verify clean syntax.\n4. Commit changes with a descriptive git message.`;
+                }
+
+                if (outputArea) outputArea.value = responseText.trim();
+                if (resultBox) resultBox.classList.remove("hidden");
+                if (insertBtn) insertBtn.disabled = false;
+            } catch (err) {
+                alert("Puter AI generation failed: " + err.message);
+            } finally {
+                generateBtn.disabled = false;
+                generateBtn.innerHTML = origText;
+            }
+        }
+
+        function copyPuterResult() {
+            const outputArea = document.getElementById("puter-copilot-output");
+            if (outputArea && outputArea.value) {
+                navigator.clipboard.writeText(outputArea.value);
+                alert("Prompt copied to clipboard!");
+            }
+        }
+
+        function insertPuterPromptIntoDispatcher() {
+            const outputArea = document.getElementById("puter-copilot-output");
+            if (!outputArea || !outputArea.value.trim()) return;
+            const text = outputArea.value.trim();
+
+            if (activePuterAiTarget === "broadcast") {
+                const bInput = document.getElementById("broadcast-prompt-input");
+                if (bInput) bInput.value = text;
+            } else {
+                const dInput = document.getElementById("dedicated-prompt-input");
+                if (dInput) dInput.value = text;
+            }
+            closePuterAiModal();
+        }
+
+        function populatePuterWorkspaceSelects() {
+            const hostSelect = document.getElementById("puter-host-ws-select");
+            const syncSelect = document.getElementById("puter-sync-ws-select");
+            const subInput = document.getElementById("puter-host-subdomain");
+
+            const wsList = Object.values(WORKSPACES || {});
+            if (hostSelect) {
+                hostSelect.innerHTML = wsList.length === 0
+                    ? `<option value="">No workspaces available</option>`
+                    : wsList.map(w => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)} (${w.file_count || 0} files)</option>`).join("");
+            }
+            if (syncSelect) {
+                syncSelect.innerHTML = wsList.length === 0
+                    ? `<option value="">No workspaces available</option>`
+                    : wsList.map(w => `<option value="${escapeHtml(w.id)}">${escapeHtml(w.name)}</option>`).join("");
+            }
+            if (subInput && !subInput.value.trim() && wsList.length > 0) {
+                const clean = wsList[0].name.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 16);
+                subInput.value = clean + "-" + Math.floor(Math.random() * 1000);
+            }
+        }
+
+        async function deployWorkspaceLiveToPuter() {
+            const wsSelect = document.getElementById("puter-host-ws-select");
+            const subInput = document.getElementById("puter-host-subdomain");
+            const statusEl = document.getElementById("puter-hosting-status");
+            const btn = document.getElementById("btn-deploy-puter-site");
+            const alertBox = document.getElementById("puter-site-live-alert");
+            const linkEl = document.getElementById("puter-site-live-link");
+            const openBtn = document.getElementById("puter-site-open-btn");
+
+            const wsId = wsSelect ? wsSelect.value : "";
+            const subdomain = (subInput ? subInput.value.trim() : "").toLowerCase().replace(/[^a-z0-9\\-]/g, "");
+
+            if (!wsId) return alert("Please select a workspace to publish.");
+            if (!subdomain) return alert("Please enter a valid subdomain name (letters, numbers, hyphens only).");
+
+            if (typeof puter === "undefined" || !puter.hosting) {
+                alert("Puter SDK is not available or blocked in this browser.");
+                return;
+            }
+
+            const origHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Bundling & Uploading to Puter...`;
+            if (statusEl) statusEl.textContent = "Fetching workspace files bundle...";
+
+            try {
+                const bundleRes = await fetch(`/api/workspaces/${encodeURIComponent(wsId)}/bundle`);
+                if (!bundleRes.ok) throw new Error("Failed to package workspace bundle from server.");
+                const bundleData = await bundleRes.json();
+                const files = bundleData.files || {};
+                const fileKeys = Object.keys(files);
+
+                if (fileKeys.length === 0) {
+                    throw new Error("Workspace contains no files to host.");
+                }
+
+                if (statusEl) statusEl.textContent = `Writing ${fileKeys.length} files to Puter cloud drive...`;
+
+                const hostingDir = `hosting/${subdomain}`;
+                try {
+                    await puter.fs.mkdir(hostingDir, { recursive: true });
+                } catch (e) {}
+
+                let hasIndexHtml = false;
+                for (const relPath of fileKeys) {
+                    const fullPuterPath = `${hostingDir}/${relPath}`;
+                    const dirName = fullPuterPath.substring(0, fullPuterPath.lastIndexOf('/'));
+                    if (dirName) {
+                        try { await puter.fs.mkdir(dirName, { recursive: true }); } catch (e) {}
+                    }
+                    await puter.fs.write(fullPuterPath, files[relPath]);
+                    if (relPath.toLowerCase() === "index.html" || relPath.toLowerCase() === "public/index.html") {
+                        hasIndexHtml = true;
+                    }
+                }
+
+                if (!hasIndexHtml) {
+                    const fallbackHtml = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>" + escapeHtml(bundleData.workspace_name) + "</title><style>body{background:#090d16;color:#fff;font-family:sans-serif;text-align:center;padding:50px}</style></head><body><h1>" + escapeHtml(bundleData.workspace_name) + "</h1><p style='color:#94a3b8'>Deployed live from Webigo AI Workspaces to Puter.site</p></body></html>";
+                    await puter.fs.write(`${hostingDir}/index.html`, fallbackHtml);
+                }
+
+                if (statusEl) statusEl.textContent = "Creating live public site on puter.hosting...";
+                const site = await puter.hosting.create(subdomain, hostingDir);
+                const liveUrl = site && site.subdomain ? `https://${site.subdomain}.puter.site` : `https://${subdomain}.puter.site`;
+
+                if (statusEl) statusEl.textContent = "Live! Hosted at " + liveUrl;
+                if (linkEl) {
+                    linkEl.href = liveUrl;
+                    linkEl.textContent = liveUrl;
+                }
+                if (openBtn) openBtn.href = liveUrl;
+                if (alertBox) alertBox.classList.remove("hidden");
+            } catch (err) {
+                alert("Live hosting deployment failed: " + err.message);
+                if (statusEl) statusEl.textContent = "Error: " + err.message;
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
+        }
+
+        function copyPuterSiteUrl() {
+            const linkEl = document.getElementById("puter-site-live-link");
+            if (linkEl && linkEl.href) {
+                navigator.clipboard.writeText(linkEl.href);
+                alert("Live URL copied: " + linkEl.href);
+            }
+        }
+
+        async function backupWorkspaceToPuterFs() {
+            const wsSelect = document.getElementById("puter-sync-ws-select");
+            const btn = document.getElementById("btn-sync-to-puter");
+            const feedback = document.getElementById("puter-sync-feedback");
+
+            const wsId = wsSelect ? wsSelect.value : "";
+            if (!wsId) return alert("Select a workspace to sync.");
+
+            if (typeof puter === "undefined" || !puter.fs) {
+                alert("Puter SDK is not available.");
+                return;
+            }
+
+            const origHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Syncing to Puter Drive...`;
+            if (feedback) feedback.textContent = "Downloading workspace bundle...";
+
+            try {
+                const bundleRes = await fetch(`/api/workspaces/${encodeURIComponent(wsId)}/bundle`);
+                if (!bundleRes.ok) throw new Error("Failed to fetch workspace files.");
+                const bundleData = await bundleRes.json();
+                const files = bundleData.files || {};
+                const fileKeys = Object.keys(files);
+                const cleanName = (bundleData.workspace_name || wsId).replace(/[^a-zA-Z0-9_\\-]/g, "_");
+                const targetDir = `webigo-workspaces/${cleanName}`;
+
+                try { await puter.fs.mkdir(targetDir, { recursive: true }); } catch (e) {}
+
+                for (const relPath of fileKeys) {
+                    const fullPath = `${targetDir}/${relPath}`;
+                    const dirName = fullPath.substring(0, fullPath.lastIndexOf('/'));
+                    if (dirName) {
+                        try { await puter.fs.mkdir(dirName, { recursive: true }); } catch (e) {}
+                    }
+                    await puter.fs.write(fullPath, files[relPath]);
+                }
+
+                if (feedback) feedback.innerHTML = `<span class="text-emerald-400 font-bold"><i class="fa-solid fa-circle-check"></i> Synced ${fileKeys.length} files to puter://${targetDir}/</span>`;
+            } catch (err) {
+                alert("Puter drive sync failed: " + err.message);
+                if (feedback) feedback.textContent = "Error: " + err.message;
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = origHtml;
+            }
+        }
+
+        /* ============================================================ */
+        /* WEBOS MULTI-WINDOW DESKTOP WINDOW MANAGER                    */
+        /* ============================================================ */
+        let webosWindows = {};
+        let webosZIndexCounter = 100;
+        let webosStartMenuOpen = false;
+
+        function initWebos() {
+            document.addEventListener("click", function(e) {
+                const startMenu = document.getElementById("webos-start-menu");
+                const startBtn = document.getElementById("webos-start-btn");
+                if (startMenu && !startMenu.contains(e.target) && !startBtn.contains(e.target)) {
+                    startMenu.classList.add("hidden");
+                    webosStartMenuOpen = false;
+                }
+            });
+            updateWebosUserInfo();
+        }
+
+        function updateWebosClock() {
+            const clockEl = document.getElementById("webos-clock");
+            if (clockEl) {
+                const now = new Date();
+                clockEl.textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            }
+        }
+
+        function toggleWebosStartMenu() {
+            const startMenu = document.getElementById("webos-start-menu");
+            if (!startMenu) return;
+            webosStartMenuOpen = !webosStartMenuOpen;
+            if (webosStartMenuOpen) {
+                startMenu.classList.remove("hidden");
+                startMenu.classList.add("flex");
+            } else {
+                startMenu.classList.add("hidden");
+                startMenu.classList.remove("flex");
+            }
+        }
+
+        function updateWebosUserInfo() {
+            const nameEl = document.getElementById("webos-user-name");
+            const avatarEl = document.getElementById("webos-user-avatar");
+            const tierEl = document.getElementById("webos-user-tier");
+            const roleEl = document.getElementById("webos-user-role");
+
+            if (currentUser) {
+                if (nameEl) nameEl.textContent = currentUser.name || currentUser.username;
+                if (avatarEl) avatarEl.textContent = (currentUser.name || currentUser.username || "W").charAt(0).toUpperCase();
+                if (tierEl) tierEl.textContent = (currentUser.tier || "Pro").toUpperCase() + " PLAN";
+                if (roleEl) roleEl.textContent = currentUser.role || "Developer";
+            }
+        }
+
+        function openWebosWindow(appId, opts = {}) {
+            if (webosWindows[appId]) {
+                const win = webosWindows[appId].element;
+                win.style.display = "flex";
+                focusWebosWindow(appId);
+                return;
+            }
+
+            const container = document.getElementById("webos-windows-container");
+            if (!container) return;
+
+            let title = "App";
+            let icon = "fa-solid fa-window-maximize";
+            let contentHtml = "";
+            let initialWidth = 800;
+            let initialHeight = 520;
+
+            if (appId.startsWith("agent-")) {
+                const agent = agents.find(a => a.id === appId);
+                if (!agent) return;
+                const eng = getAgentEngine(agent.type);
+                title = `${agent.name} (${agent.role})`;
+                icon = eng.icon;
+                const vncUrl = `http://${agent.ip}:${agent.vncPort || 6080}/vnc.html?autoconnect=true&resize=scale`;
+                contentHtml = `<iframe src="${vncUrl}" class="w-full h-full border-0 bg-black"></iframe>`;
+            } else if (appId === "app-workspaces") {
+                openWorkspacesModal();
+                return;
+            } else if (appId === "app-copilot") {
+                openPuterAiModal();
+                return;
+            } else if (appId === "app-puter-cloud") {
+                openWorkspacesModal();
+                switchWorkspacesTab("puter");
+                return;
+            } else if (appId === "app-broadcast") {
+                selectView("overview");
+                return;
+            } else if (appId === "app-skills") {
+                openSkillsModal();
+                return;
+            } else if (appId === "app-ceo") {
+                openCeoModal();
+                return;
+            } else if (appId === "app-overview") {
+                selectView("overview");
+                return;
+            }
+
+            const winCount = Object.keys(webosWindows).length;
+            const posX = Math.min(window.innerWidth - 350, 40 + (winCount % 8) * 30);
+            const posY = Math.min(window.innerHeight - 300, 30 + (winCount % 8) * 25);
+            webosZIndexCounter++;
+
+            const winEl = document.createElement("div");
+            winEl.id = `webos-win-${appId}`;
+            winEl.className = "webos-window absolute rounded-2xl glass shadow-2xl flex flex-col overflow-hidden pointer-events-auto border border-white/10";
+            winEl.style.width = `${initialWidth}px`;
+            winEl.style.height = `${initialHeight}px`;
+            winEl.style.left = `${posX}px`;
+            winEl.style.top = `${posY}px`;
+            winEl.style.zIndex = webosZIndexCounter;
+            winEl.style.resize = "both";
+            winEl.style.minWidth = "360px";
+            winEl.style.minHeight = "260px";
+
+            winEl.innerHTML = `
+                <!-- Window Titlebar -->
+                <div class="webos-window-header px-4 py-2.5 flex items-center justify-between border-b cursor-grab select-none flex-shrink-0" style="background-color: var(--bg-sidebar); border-color: var(--border-base);">
+                    <div class="flex items-center space-x-2.5 min-w-0">
+                        <i class="${icon} text-sky-400 text-xs"></i>
+                        <span class="text-xs font-bold text-white truncate">${escapeHtml(title)}</span>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <button onclick="minimizeWebosWindow('${appId}')" class="w-6 h-6 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition flex items-center justify-center text-xs cursor-pointer" title="Minimize">
+                            <i class="fa-solid fa-minus"></i>
+                        </button>
+                        <button onclick="maximizeWebosWindow('${appId}')" class="w-6 h-6 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition flex items-center justify-center text-xs cursor-pointer" title="Maximize">
+                            <i class="fa-regular fa-square" id="webos-max-icon-${appId}"></i>
+                        </button>
+                        <button onclick="closeWebosWindow('${appId}')" class="w-6 h-6 rounded-lg hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition flex items-center justify-center text-xs cursor-pointer" title="Close">
+                            <i class="fa-solid fa-xmark"></i>
+                        </button>
+                    </div>
+                </div>
+                <!-- Window Body -->
+                <div class="flex-1 min-h-0 relative overflow-hidden bg-black">
+                    ${contentHtml}
+                </div>
+            `;
+
+            winEl.addEventListener("mousedown", () => focusWebosWindow(appId));
+
+            const header = winEl.querySelector(".webos-window-header");
+            let isDragging = false;
+            let dragStartX = 0, dragStartY = 0;
+            let winStartX = 0, winStartY = 0;
+
+            header.addEventListener("mousedown", function(e) {
+                if (e.target.closest("button")) return;
+                isDragging = true;
+                header.classList.add("cursor-grabbing");
+                dragStartX = e.clientX;
+                dragStartY = e.clientY;
+                winStartX = winEl.offsetLeft;
+                winStartY = winEl.offsetTop;
+
+                function onMouseMove(e) {
+                    if (!isDragging) return;
+                    const deltaX = e.clientX - dragStartX;
+                    const deltaY = e.clientY - dragStartY;
+                    winEl.style.left = `${Math.max(0, winStartX + deltaX)}px`;
+                    winEl.style.top = `${Math.max(0, winStartY + deltaY)}px`;
+                }
+
+                function onMouseUp() {
+                    isDragging = false;
+                    header.classList.remove("cursor-grabbing");
+                    document.removeEventListener("mousemove", onMouseMove);
+                    document.removeEventListener("mouseup", onMouseUp);
+                }
+
+                document.addEventListener("mousemove", onMouseMove);
+                document.addEventListener("mouseup", onMouseUp);
+            });
+
+            container.appendChild(winEl);
+
+            webosWindows[appId] = {
+                id: appId,
+                title: title,
+                icon: icon,
+                element: winEl,
+                isMaximized: false,
+                prevBounds: null
+            };
+
+            addWebosTaskbarTab(appId, title, icon);
+            focusWebosWindow(appId);
+        }
+
+        function focusWebosWindow(appId) {
+            const winObj = webosWindows[appId];
+            if (!winObj) return;
+            webosZIndexCounter++;
+            winObj.element.style.zIndex = webosZIndexCounter;
+
+            Object.keys(webosWindows).forEach(id => {
+                const tab = document.getElementById(`webos-tab-${id}`);
+                if (tab) {
+                    if (id === appId) {
+                        tab.className = "px-3 py-1 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition bg-white/15 text-white border border-white/20 shadow flex-shrink-0 cursor-pointer";
+                    } else {
+                        tab.className = "px-3 py-1 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition text-slate-400 hover:text-white bg-white/5 border border-white/5 flex-shrink-0 cursor-pointer";
+                    }
+                }
+            });
+        }
+
+        function minimizeWebosWindow(appId) {
+            const winObj = webosWindows[appId];
+            if (!winObj) return;
+            winObj.element.style.display = "none";
+            const tab = document.getElementById(`webos-tab-${appId}`);
+            if (tab) {
+                tab.className = "px-3 py-1 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition text-slate-500 bg-white/5 border border-white/5 opacity-60 flex-shrink-0 cursor-pointer";
+            }
+        }
+
+        function maximizeWebosWindow(appId) {
+            const winObj = webosWindows[appId];
+            if (!winObj) return;
+            const win = winObj.element;
+            const icon = document.getElementById(`webos-max-icon-${appId}`);
+
+            if (winObj.isMaximized) {
+                win.style.left = winObj.prevBounds.left;
+                win.style.top = winObj.prevBounds.top;
+                win.style.width = winObj.prevBounds.width;
+                win.style.height = winObj.prevBounds.height;
+                winObj.isMaximized = false;
+                if (icon) icon.className = "fa-regular fa-square";
+            } else {
+                winObj.prevBounds = {
+                    left: win.style.left,
+                    top: win.style.top,
+                    width: win.style.width,
+                    height: win.style.height
+                };
+                win.style.left = "0px";
+                win.style.top = "0px";
+                win.style.width = "100%";
+                win.style.height = "calc(100% - 48px)";
+                winObj.isMaximized = true;
+                if (icon) icon.className = "fa-regular fa-window-restore";
+            }
+            focusWebosWindow(appId);
+        }
+
+        function closeWebosWindow(appId) {
+            const winObj = webosWindows[appId];
+            if (!winObj) return;
+            winObj.element.remove();
+            delete webosWindows[appId];
+
+            const tab = document.getElementById(`webos-tab-${appId}`);
+            if (tab) tab.remove();
+        }
+
+        function addWebosTaskbarTab(appId, title, icon) {
+            const tabsContainer = document.getElementById("webos-taskbar-tabs");
+            if (!tabsContainer) return;
+
+            const tabBtn = document.createElement("button");
+            tabBtn.id = `webos-tab-${appId}`;
+            tabBtn.className = "px-3 py-1 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition bg-white/15 text-white border border-white/20 shadow flex-shrink-0 cursor-pointer";
+            tabBtn.innerHTML = `
+                <i class="${icon} text-sky-400 text-xs"></i>
+                <span class="truncate max-w-[120px]">${escapeHtml(title)}</span>
+            `;
+            tabBtn.onclick = function() {
+                const winObj = webosWindows[appId];
+                if (!winObj) return;
+                if (winObj.element.style.display === "none") {
+                    winObj.element.style.display = "flex";
+                    focusWebosWindow(appId);
+                } else if (winObj.element.style.zIndex == webosZIndexCounter) {
+                    minimizeWebosWindow(appId);
+                } else {
+                    focusWebosWindow(appId);
+                }
+            };
+            tabsContainer.appendChild(tabBtn);
+        }
+
+        function minimizeAllWindows() {
+            Object.keys(webosWindows).forEach(id => {
+                minimizeWebosWindow(id);
+            });
+        }
+
         // Build DOM structure ONCE at startup
         async function init() {
             const savedTheme = localStorage.getItem("cockpit_theme") || "onyx-stealth";
             setTheme(savedTheme);
             applyLayoutMode();
+            initPuter();
+            initWebos();
+            setInterval(updateWebosClock, 1000);
+            updateWebosClock();
 
             try {
                 const res = await fetch("/api/agents");
@@ -3445,18 +5062,46 @@ HTML_TEMPLATE = """
                 }
             });
 
-            if (viewId === "overview") {
+            const webosView = document.getElementById("webos-desktop-view");
+            const navWebosBtn = document.getElementById("nav-btn-webos");
+
+            if (viewId === "webos") {
+                dedicatedView.classList.add("hidden");
+                overviewView.classList.add("hidden");
+                if (webosView) webosView.classList.remove("hidden");
+                if (navWebosBtn) {
+                    navWebosBtn.style.backgroundColor = "var(--nav-active-bg)";
+                    navWebosBtn.style.borderColor = "var(--nav-active-border)";
+                    navWebosBtn.classList.add("shadow-lg");
+                }
+                navOverviewBtn.style.backgroundColor = "var(--bg-input)";
+                navOverviewBtn.style.borderColor = "var(--border-base)";
+                navOverviewBtn.classList.remove("shadow-lg");
+                updateWebosUserInfo();
+            } else if (viewId === "overview") {
+                if (webosView) webosView.classList.add("hidden");
                 dedicatedView.classList.add("hidden");
                 overviewView.classList.remove("hidden");
                 navOverviewBtn.style.backgroundColor = "var(--nav-active-bg)";
                 navOverviewBtn.style.borderColor = "var(--nav-active-border)";
                 navOverviewBtn.classList.add("shadow-lg");
+                if (navWebosBtn) {
+                    navWebosBtn.style.backgroundColor = "var(--bg-input)";
+                    navWebosBtn.style.borderColor = "var(--border-base)";
+                    navWebosBtn.classList.remove("shadow-lg");
+                }
             } else {
+                if (webosView) webosView.classList.add("hidden");
                 overviewView.classList.add("hidden");
                 dedicatedView.classList.remove("hidden");
-                navOverviewBtn.style.backgroundColor = "var(--bg-card)";
+                navOverviewBtn.style.backgroundColor = "var(--bg-input)";
                 navOverviewBtn.style.borderColor = "var(--border-base)";
                 navOverviewBtn.classList.remove("shadow-lg");
+                if (navWebosBtn) {
+                    navWebosBtn.style.backgroundColor = "var(--bg-input)";
+                    navWebosBtn.style.borderColor = "var(--border-base)";
+                    navWebosBtn.classList.remove("shadow-lg");
+                }
 
                 agents.forEach(a => {
                     const f = document.getElementById(`dedicated-frame-${a.id}`);
@@ -5372,7 +7017,7 @@ Describe the main objective of this capability.
         function switchWorkspacesTab(tab) {
             if (tab === "import") tab = "git";
             activeWorkspacesTab = tab;
-            const tabs = ["library", "git", "upload", "templates", "matrix"];
+            const tabs = ["library", "git", "upload", "templates", "matrix", "puter"];
             tabs.forEach(t => {
                 const view = document.getElementById(`ws-tab-${t}`);
                 const btn = document.getElementById(`ws-tab-btn-${t}`);
@@ -5391,6 +7036,7 @@ Describe the main objective of this capability.
                 }
             });
             if (tab === "matrix") renderWorkspaceMatrix();
+            if (tab === "puter") populatePuterWorkspaceSelects();
         }
 
         function handleWsFileSelect(files) {
@@ -5766,87 +7412,92 @@ Describe the main objective of this capability.
             if (modal) modal.classList.add("hidden");
         }
 
+        let currentUser = null;
+
         async function checkAuthStatus() {
             try {
                 const res = await fetch("/api/auth/me");
                 const data = await res.json();
-                const signedInView = document.getElementById("auth-signed-in-view");
-                const loginForm = document.getElementById("auth-login-form");
-                const nameLabel = document.getElementById("auth-user-display-name");
-                const badge = document.getElementById("nav-auth-badge");
+
+                if (!data.authenticated || !data.user) {
+                    // Mandatory Auth: Reload immediately to hit server Auth Wall
+                    window.location.reload();
+                    return;
+                }
+
+                currentUser = data.user;
+                const user = data.user;
+
+                // Update sidebar widget
                 const userLabel = document.getElementById("nav-auth-user-label");
+                const roleLabel = document.getElementById("nav-auth-role-label");
+                const badge = document.getElementById("nav-auth-badge");
+                const quotaAgents = document.getElementById("nav-quota-agents-val");
+                const quotaWs = document.getElementById("nav-quota-ws-val");
 
-                if (data.authenticated && data.user) {
-                    if (signedInView) signedInView.classList.remove("hidden");
-                    if (loginForm) loginForm.classList.add("hidden");
-                    if (nameLabel) nameLabel.textContent = `${data.user.name || data.user.username} (${data.user.role || 'user'})`;
-                    if (badge) {
-                        badge.textContent = data.user.username;
-                        badge.style.color = "#818cf8";
-                        badge.style.borderColor = "rgba(129, 140, 248, 0.4)";
+                if (userLabel) userLabel.textContent = user.name || user.username;
+                if (roleLabel) roleLabel.textContent = `${user.role || 'developer'} · ${user.tier_label || user.tier || 'Starter'}`;
+                if (quotaAgents) quotaAgents.textContent = `${user.agent_count ?? 0}/${user.max_agents ?? 2}`;
+                if (quotaWs) quotaWs.textContent = `${user.workspace_count ?? 0}/${user.max_workspaces ?? 3}`;
+
+                if (badge) {
+                    badge.textContent = (user.tier || 'starter').toUpperCase();
+                    if (user.tier === 'starter') {
+                        badge.style.color = '#34d399';
+                        badge.style.borderColor = 'rgba(52, 211, 153, 0.4)';
+                        badge.style.background = 'rgba(52, 211, 153, 0.12)';
+                    } else if (user.tier === 'pro') {
+                        badge.style.color = '#818cf8';
+                        badge.style.borderColor = 'rgba(129, 140, 248, 0.4)';
+                        badge.style.background = 'rgba(129, 140, 248, 0.15)';
+                    } else {
+                        badge.style.color = '#fbbf24';
+                        badge.style.borderColor = 'rgba(251, 191, 36, 0.4)';
+                        badge.style.background = 'rgba(251, 191, 36, 0.15)';
                     }
-                    if (userLabel) userLabel.textContent = data.user.name || data.user.username;
-                } else {
-                    if (signedInView) signedInView.classList.add("hidden");
-                    if (loginForm) loginForm.classList.remove("hidden");
-                    if (badge) {
-                        badge.textContent = "Sign In";
-                        badge.style.color = "";
-                        badge.style.borderColor = "";
-                    }
-                    if (userLabel) userLabel.textContent = "User Auth";
                 }
+
+                // Update Auth & Quotas Modal
+                const modalName = document.getElementById("auth-user-display-name");
+                const modalUsername = document.getElementById("auth-user-username-display");
+                const modalPlanBadge = document.getElementById("auth-user-plan-badge");
+                const agentsRatio = document.getElementById("auth-modal-agents-ratio");
+                const agentsBar = document.getElementById("auth-modal-agents-bar");
+                const agentsPct = document.getElementById("auth-modal-agents-pct");
+                const wsRatio = document.getElementById("auth-modal-ws-ratio");
+                const wsBar = document.getElementById("auth-modal-ws-bar");
+                const wsPct = document.getElementById("auth-modal-ws-pct");
+
+                if (modalName) modalName.textContent = user.name || user.username;
+                if (modalUsername) modalUsername.textContent = `@${user.username} (${user.role || 'user'})`;
+                if (modalPlanBadge) modalPlanBadge.textContent = `${(user.tier || 'starter').toUpperCase()} PLAN`;
+
+                const aCount = user.agent_count ?? 0;
+                const aMax = user.max_agents ?? 2;
+                const aPctVal = Math.min(100, Math.round((aCount / aMax) * 100));
+                if (agentsRatio) agentsRatio.textContent = `${aCount} / ${aMax}`;
+                if (agentsBar) agentsBar.style.width = `${aPctVal}%`;
+                if (agentsPct) agentsPct.textContent = `${aPctVal}% Used`;
+
+                const wCount = user.workspace_count ?? 0;
+                const wMax = user.max_workspaces ?? 3;
+                const wPctVal = Math.min(100, Math.round((wCount / wMax) * 100));
+                if (wsRatio) wsRatio.textContent = `${wCount} / ${wMax}`;
+                if (wsBar) wsBar.style.width = `${wPctVal}%`;
+                if (wsPct) wsPct.textContent = `${wPctVal}% Used`;
+
             } catch (e) {
-                console.error("Auth check failed:", e);
-            }
-        }
-
-        async function submitLogin() {
-            const username = document.getElementById("auth-input-username").value.trim();
-            const password = document.getElementById("auth-input-password").value.trim();
-            const fb = document.getElementById("auth-login-feedback");
-            const btn = document.getElementById("btn-submit-login");
-
-            const origHtml = btn.innerHTML;
-            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Authenticating...`;
-            btn.disabled = true;
-
-            try {
-                const res = await fetch("/api/auth/login", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ username, password })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    if (fb) fb.classList.add("hidden");
-                    document.getElementById("auth-input-password").value = "";
-                    await checkAuthStatus();
-                    closeAuthModal();
-                } else {
-                    if (fb) {
-                        fb.textContent = data.error || "Login failed";
-                        fb.classList.remove("hidden");
-                    }
-                }
-            } catch (e) {
-                if (fb) {
-                    fb.textContent = "Login error: " + e.message;
-                    fb.classList.remove("hidden");
-                }
-            } finally {
-                btn.innerHTML = origHtml;
-                btn.disabled = false;
+                console.error("Auth check error:", e);
             }
         }
 
         async function submitLogout() {
             try {
                 await fetch("/api/auth/logout", { method: "POST" });
-                await checkAuthStatus();
             } catch (e) {
                 console.error("Logout error:", e);
             }
+            window.location.reload();
         }
 
         async function createWorkspaceTemplate(template) {
@@ -6931,11 +8582,15 @@ def pve_api_request(method, agent, path_suffix, **kwargs):
 
 @app.route("/")
 def index():
+    user = get_current_user()
+    if not user and os.environ.get("COCKPIT_DISABLE_AUTH", "").lower() not in ["1", "true"]:
+        return Response(AUTH_PAGE_TEMPLATE, mimetype="text/html")
     load_agents_config()
     rendered = HTML_TEMPLATE.replace("__AGENTS_JSON_PLACEHOLDER__", json.dumps(AGENTS))
     return Response(rendered, mimetype="text/html")
 
 @app.route("/api/status")
+@require_auth
 def get_all_status():
     results = {}
     for agent in AGENTS:
@@ -6980,6 +8635,7 @@ def get_all_status():
     return jsonify(results)
 
 @app.route("/api/power", methods=["POST"])
+@require_auth
 def power_control():
     data = request.get_json(force=True, silent=True) or {}
     agent_id = data.get("agent_id")
@@ -6999,6 +8655,7 @@ def power_control():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/logs")
+@require_auth
 def get_agent_logs():
     agent_id = request.args.get("agent_id", "agent-1")
     agent = next((a for a in AGENTS if a["id"] == agent_id), AGENTS[0])
@@ -7009,6 +8666,7 @@ def get_agent_logs():
         return jsonify({"logs": [{"type": "error", "text": f"Agent {agent['name']} is currently offline or stopped."}]})
 
 @app.route("/api/agent/screenshot", methods=["GET"])
+@require_auth
 def grab_agent_screenshot():
     agent_id = request.args.get("agent_id", "agent-1")
     agent = next((a for a in AGENTS if a["id"] == agent_id), None)
@@ -7085,6 +8743,7 @@ def dispatch_task_internal(target="agent-1", prompt="", images=None, ws_id=None,
     return {"success": True, "message": "Task dispatched", "responses": responses, "workspace_id": ws_id}
 
 @app.route("/api/dispatch", methods=["POST"])
+@require_auth
 def dispatch_task():
     data = request.get_json(force=True, silent=True) or {}
     res = dispatch_task_internal(
@@ -7097,6 +8756,7 @@ def dispatch_task():
     return jsonify(res)
 
 @app.route("/api/auth", methods=["POST"])
+@require_auth
 def save_auth():
     data = request.get_json(force=True, silent=True) or {}
     target = data.get("target", "agent-1")
@@ -7112,6 +8772,7 @@ def save_auth():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/restart_desktop", methods=["POST"])
+@require_auth
 def restart_desktop():
     agent_id = request.args.get("agent_id", "agent-1")
     agent = next((a for a in AGENTS if a["id"] == agent_id), None)
@@ -7128,6 +8789,7 @@ def restart_desktop():
 # SKILLS HUB API ENDPOINTS
 # ------------------------------------------------------------------
 @app.route("/api/skills/library", methods=["GET"])
+@require_auth
 def get_skills_library_route():
     force_refresh = request.args.get("refresh") in ["1", "true", "yes"]
     skills = get_library_skills(force_refresh=force_refresh)
@@ -7135,6 +8797,7 @@ def get_skills_library_route():
     return jsonify({"skills": skills, "categories": cats, "count": len(skills), "lib_dir": SKILLS_LIB_DIR})
 
 @app.route("/api/skills/installed", methods=["GET"])
+@require_auth
 def get_agent_installed_skills():
     agent_id = request.args.get("agent_id", "agent-1")
     agent = next((a for a in AGENTS if a["id"] == agent_id), None)
@@ -7147,6 +8810,7 @@ def get_agent_installed_skills():
         return jsonify({"error": str(e), "skills": []})
 
 @app.route("/api/skills/load", methods=["POST"])
+@require_auth
 def load_skill_to_agent():
     data = request.get_json(force=True, silent=True) or {}
     target = data.get("target", "agent-1")
@@ -7188,6 +8852,7 @@ def load_skill_to_agent():
     return jsonify({"success": True, "results": results})
 
 @app.route("/api/skills/sync_all", methods=["POST"])
+@require_auth
 def sync_all_skills():
     data = request.get_json(force=True, silent=True) or {}
     target = data.get("target", "agent-1")
@@ -7212,6 +8877,7 @@ def sync_all_skills():
     return jsonify({"success": True, "message": "Synchronized entire skills library", "results": results})
 
 @app.route("/api/skills/download", methods=["GET"])
+@require_auth
 def download_skill_route():
     skill_id = request.args.get("skill_id", "").strip()
     if not skill_id:
@@ -7237,6 +8903,7 @@ def download_skill_route():
     )
 
 @app.route("/api/skills/download_all", methods=["GET"])
+@require_auth
 def download_all_skills_route():
     archive_bytes = ensure_skills_archive_bytes()
     if not archive_bytes:
@@ -7250,6 +8917,7 @@ def download_all_skills_route():
     )
 
 @app.route("/api/skills/download_from_agent", methods=["GET"])
+@require_auth
 def download_skill_from_agent_route():
     agent_id = request.args.get("agent_id", "agent-1")
     skill_name = request.args.get("skill_name", "").strip()
@@ -7285,6 +8953,7 @@ def download_skill_from_agent_route():
         return jsonify({"error": f"Failed to export skill from agent: {str(e)}"}), 500
 
 @app.route("/api/skills/upload", methods=["POST"])
+@require_auth
 def upload_skill_to_library():
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded. Form field 'file' required."}), 400
@@ -7351,6 +9020,7 @@ def upload_skill_to_library():
         return jsonify({"error": f"Import failed: {str(e)}"}), 500
 
 @app.route("/api/skills/remove", methods=["DELETE"])
+@require_auth
 def remove_skill():
     agent_id = request.args.get("agent_id", "agent-1")
     skill_name = request.args.get("name")
@@ -7468,11 +9138,13 @@ def get_package_file(filename):
 # AGENTS MANAGEMENT API (RENAME & ADD)
 # ------------------------------------------------------------------
 @app.route("/api/agents", methods=["GET"])
+@require_auth
 def get_agents_list():
     load_agents_config()
     return jsonify({"agents": AGENTS})
 
 @app.route("/api/agents/<agent_id>/quota", methods=["GET", "POST"])
+@require_auth
 def get_agent_quota_route(agent_id):
     load_agents_config()
     agent = next((a for a in AGENTS if a["id"] == agent_id), None)
@@ -7494,6 +9166,7 @@ def get_agent_quota_route(agent_id):
         return jsonify({"error": f"Failed to connect to agent bridge: {str(e)}"}), 502
 
 @app.route("/api/agents/rename", methods=["POST"])
+@require_auth
 def rename_agent_route():
     data = request.get_json(force=True, silent=True) or {}
     agent_id = data.get("agent_id") or data.get("id")
@@ -7540,6 +9213,7 @@ def rename_agent_route():
     return jsonify({"success": True, "agent": agent})
 
 @app.route("/api/agents/remove", methods=["POST", "DELETE"])
+@require_auth
 def remove_agent_route():
     data = request.get_json(force=True, silent=True) or {}
     agent_id = data.get("agent_id") or data.get("id") or request.args.get("agent_id")
@@ -7572,6 +9246,7 @@ def remove_agent_route():
     return jsonify({"success": True, "removed_id": agent_id, "agents": AGENTS})
 
 @app.route("/api/fleet/sync", methods=["GET", "POST"])
+@require_auth
 def fleet_sync_route():
     agents_list = sync_fleet_with_proxmox()
     vmids = [a.get("vmid", 0) for a in agents_list if a.get("vmid")]
@@ -7587,6 +9262,7 @@ def fleet_sync_route():
     })
 
 @app.route("/api/agents/provision_status", methods=["GET"])
+@require_auth
 def agent_provision_status_route():
     vmid_param = request.args.get("vmid")
     if vmid_param:
@@ -7602,6 +9278,20 @@ def agent_provision_status_route():
 
 @app.route("/api/agents/add", methods=["POST"])
 def add_agent_route():
+    user = get_current_user()
+    if not user and os.environ.get("COCKPIT_DISABLE_AUTH", "").lower() not in ["1", "true"]:
+        return jsonify({"error": "Unauthorized. Please sign in to create agents."}), 401
+
+    load_agents_config()
+    if user and user.get("role") != "admin":
+        user_agents = [a for a in AGENTS if a.get("owner") == user["username"]]
+        max_allowed = user.get("max_agents", 2)
+        if len(user_agents) >= max_allowed:
+            tier_name = user.get("tier", "starter").title()
+            return jsonify({
+                "error": f"Agent quota exceeded! Your {tier_name} plan allows up to {max_allowed} agents (you currently have {len(user_agents)}). Please upgrade your plan or remove an existing agent."
+            }), 403
+
     data = request.get_json(force=True, silent=True) or {}
     name = (data.get("name") or request.args.get("name") or request.form.get("name") or "").strip()
     role = (data.get("role") or request.args.get("role") or request.form.get("role") or "Specialist").strip()
@@ -7685,7 +9375,8 @@ def add_agent_route():
         "role": role,
         "ip": ip,
         "port": port,
-        "vnc_port": vnc_port
+        "vnc_port": vnc_port,
+        "owner": user.get("username", "admin") if user else "admin"
     }
     AGENTS.append(new_agent)
     save_agents_config()
@@ -7696,12 +9387,27 @@ def add_agent_route():
 # WORKSPACES MANAGEMENT API
 # ------------------------------------------------------------------
 @app.route("/api/workspaces", methods=["GET"])
+@require_auth
 def get_workspaces_list():
     load_workspaces()
     return jsonify({"workspaces": list(WORKSPACES.values())})
 
 @app.route("/api/workspaces/upload", methods=["POST"])
 def upload_workspace():
+    user = get_current_user()
+    if not user and os.environ.get("COCKPIT_DISABLE_AUTH", "").lower() not in ["1", "true"]:
+        return jsonify({"error": "Unauthorized. Please sign in to create workspaces."}), 401
+
+    load_workspaces()
+    if user and user.get("role") != "admin":
+        user_ws = [w for w in WORKSPACES.values() if w.get("owner") == user["username"]]
+        max_allowed = user.get("max_workspaces", 3)
+        if len(user_ws) >= max_allowed:
+            tier_name = user.get("tier", "starter").title()
+            return jsonify({
+                "error": f"Workspace quota exceeded! Your {tier_name} plan allows up to {max_allowed} workspaces (you currently have {len(user_ws)}). Upgrade plan or remove an existing workspace."
+            }), 403
+
     ws_name = ""
     ws_desc = ""
     target_agent = ""
@@ -7784,7 +9490,8 @@ def upload_workspace():
             "dir_count": stats["dir_count"],
             "size_bytes": stats["size_bytes"],
             "primary_language": stats["primary_language"],
-            "synced_agents": []
+            "synced_agents": [],
+            "owner": user.get("username", "admin") if user else "admin"
         }
         WORKSPACES[slug_id] = ws_obj
         save_workspaces()
@@ -7804,6 +9511,20 @@ def upload_workspace():
 
 @app.route("/api/workspaces/git_clone", methods=["POST"])
 def git_clone_workspace():
+    user = get_current_user()
+    if not user and os.environ.get("COCKPIT_DISABLE_AUTH", "").lower() not in ["1", "true"]:
+        return jsonify({"error": "Unauthorized. Please sign in to clone workspaces."}), 401
+
+    load_workspaces()
+    if user and user.get("role") != "admin":
+        user_ws = [w for w in WORKSPACES.values() if w.get("owner") == user["username"]]
+        max_allowed = user.get("max_workspaces", 3)
+        if len(user_ws) >= max_allowed:
+            tier_name = user.get("tier", "starter").title()
+            return jsonify({
+                "error": f"Workspace quota exceeded! Your {tier_name} plan allows up to {max_allowed} workspaces (you currently have {len(user_ws)}). Upgrade plan or remove an existing workspace."
+            }), 403
+
     data = request.get_json(force=True, silent=True) or {}
     raw_repo_url = (data.get("repo_url") or "").strip()
     branch = (data.get("branch") or "").strip()
@@ -7888,7 +9609,8 @@ def git_clone_workspace():
             "dir_count": stats["dir_count"],
             "size_bytes": stats["size_bytes"],
             "primary_language": stats["primary_language"],
-            "synced_agents": []
+            "synced_agents": [],
+            "owner": user.get("username", "admin") if user else "admin"
         }
         WORKSPACES[slug_id] = ws_obj
         save_workspaces()
@@ -7909,6 +9631,7 @@ def git_clone_workspace():
         return jsonify({"error": err_msg}), 500
 
 @app.route("/api/workspaces/<ws_id>/git_pull", methods=["POST"])
+@require_auth
 def git_pull_workspace(ws_id):
     if ws_id not in WORKSPACES:
         load_workspaces()
@@ -7969,6 +9692,7 @@ def git_pull_workspace(ws_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/workspaces/<ws_id>/git_status", methods=["GET"])
+@require_auth
 def git_status_workspace(ws_id):
     if ws_id not in WORKSPACES:
         load_workspaces()
@@ -7999,6 +9723,7 @@ def git_status_workspace(ws_id):
     })
 
 @app.route("/api/git/config", methods=["GET", "POST"])
+@require_auth
 def manage_git_config():
     if request.method == "GET":
         cfg = load_git_config().copy()
@@ -8042,6 +9767,7 @@ def manage_git_config():
     })
 
 @app.route("/api/workspaces/<ws_id>/git_commit", methods=["POST"])
+@require_auth
 def git_commit_workspace(ws_id):
     if ws_id not in WORKSPACES:
         load_workspaces()
@@ -8093,6 +9819,7 @@ def git_commit_workspace(ws_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/workspaces/<ws_id>/git_push", methods=["POST"])
+@require_auth
 def git_push_workspace(ws_id):
     if ws_id not in WORKSPACES:
         load_workspaces()
@@ -8154,7 +9881,7 @@ def git_push_workspace(ws_id):
 @app.route("/api/auth/login", methods=["POST"])
 def api_auth_login():
     data = request.get_json(force=True, silent=True) or {}
-    username = (data.get("username") or "").strip()
+    username = (data.get("username") or "").strip().lower()
     password = (data.get("password") or "").strip()
 
     if not username or not password:
@@ -8166,10 +9893,18 @@ def api_auth_login():
         return jsonify({"error": "Invalid username or password"}), 401
 
     session_token = secrets.token_hex(32)
+    tier = user.get("tier", "starter" if user.get("role") != "admin" else "enterprise")
+    tier_info = PLAN_TIERS.get(tier, PLAN_TIERS["starter"])
+    max_agents = user.get("max_agents", 999 if user.get("role") == "admin" else tier_info["max_agents"])
+    max_workspaces = user.get("max_workspaces", 999 if user.get("role") == "admin" else tier_info["max_workspaces"])
+
     ACTIVE_SESSIONS[session_token] = {
         "username": username,
         "name": user.get("name", username),
         "role": user.get("role", "developer"),
+        "tier": tier,
+        "max_agents": max_agents,
+        "max_workspaces": max_workspaces,
         "expires": time.time() + SESSION_MAX_AGE
     }
 
@@ -8179,7 +9914,76 @@ def api_auth_login():
         "user": {
             "username": username,
             "name": user.get("name", username),
-            "role": user.get("role", "developer")
+            "role": user.get("role", "developer"),
+            "tier": tier,
+            "max_agents": max_agents,
+            "max_workspaces": max_workspaces,
+            "tier_label": tier_info["label"]
+        }
+    })
+    resp.set_cookie("cockpit_session", session_token, max_age=SESSION_MAX_AGE, httponly=True, samesite="Lax")
+    return resp
+
+@app.route("/api/auth/signup", methods=["POST"])
+def api_auth_signup():
+    data = request.get_json(force=True, silent=True) or {}
+    username = (data.get("username") or "").strip().lower()
+    password = (data.get("password") or "").strip()
+    name = (data.get("name") or "").strip() or username
+    tier = (data.get("tier") or "starter").strip().lower()
+
+    if not username or not password:
+        return jsonify({"error": "Username and password required"}), 400
+
+    if not re.match(r'^[a-z0-9_\-]{3,32}$', username):
+        return jsonify({"error": "Username must be 3-32 characters and contain only letters, numbers, hyphens, and underscores"}), 400
+
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters long"}), 400
+
+    if tier not in PLAN_TIERS:
+        tier = "starter"
+
+    load_users()
+    if username in USERS:
+        return jsonify({"error": f"Username '{username}' already exists. Please choose another or sign in."}), 400
+
+    plan_info = PLAN_TIERS[tier]
+    user_record = {
+        "username": username,
+        "password_hash": hash_password(password),
+        "role": "developer",
+        "name": name,
+        "tier": tier,
+        "max_agents": plan_info["max_agents"],
+        "max_workspaces": plan_info["max_workspaces"],
+        "created_at": time.time()
+    }
+    USERS[username] = user_record
+    save_users()
+
+    session_token = secrets.token_hex(32)
+    ACTIVE_SESSIONS[session_token] = {
+        "username": username,
+        "name": name,
+        "role": "developer",
+        "tier": tier,
+        "max_agents": plan_info["max_agents"],
+        "max_workspaces": plan_info["max_workspaces"],
+        "expires": time.time() + SESSION_MAX_AGE
+    }
+
+    resp = jsonify({
+        "success": True,
+        "token": session_token,
+        "user": {
+            "username": username,
+            "name": name,
+            "role": "developer",
+            "tier": tier,
+            "max_agents": plan_info["max_agents"],
+            "max_workspaces": plan_info["max_workspaces"],
+            "tier_label": plan_info["label"]
         }
     })
     resp.set_cookie("cockpit_session", session_token, max_age=SESSION_MAX_AGE, httponly=True, samesite="Lax")
@@ -8198,18 +10002,55 @@ def api_auth_logout():
 def api_auth_me():
     user = get_current_user()
     if user:
+        username = user.get("username")
+        role = user.get("role", "developer")
+        tier = user.get("tier", "starter" if role != "admin" else "enterprise")
+        tier_info = PLAN_TIERS.get(tier, PLAN_TIERS["starter"])
+        max_agents = user.get("max_agents", 999 if role == "admin" else tier_info["max_agents"])
+        max_workspaces = user.get("max_workspaces", 999 if role == "admin" else tier_info["max_workspaces"])
+
+        load_agents_config()
+        load_workspaces()
+
+        if role == "admin":
+            agent_count = len(AGENTS)
+            ws_count = len(WORKSPACES)
+        else:
+            agent_count = len([a for a in AGENTS if a.get("owner") == username])
+            ws_count = len([w for w in WORKSPACES.values() if w.get("owner") == username])
+
         return jsonify({
             "authenticated": True,
             "user": {
-                "username": user.get("username"),
-                "name": user.get("name"),
-                "role": user.get("role")
+                "username": username,
+                "name": user.get("name", username),
+                "role": role,
+                "tier": tier,
+                "tier_label": tier_info["label"],
+                "max_agents": max_agents,
+                "max_workspaces": max_workspaces,
+                "agent_count": agent_count,
+                "workspace_count": ws_count
             }
         })
     return jsonify({"authenticated": False})
 
 @app.route("/api/workspaces/create_template", methods=["POST"])
 def create_workspace_template():
+    user = get_current_user()
+    if not user and os.environ.get("COCKPIT_DISABLE_AUTH", "").lower() not in ["1", "true"]:
+        return jsonify({"error": "Unauthorized. Please sign in to create workspaces."}), 401
+
+    load_workspaces()
+    if user and user.get("role") != "admin":
+        user_ws = [w for w in WORKSPACES.values() if w.get("owner") == user["username"]]
+        max_allowed = user.get("max_workspaces", 3)
+        if len(user_ws) >= max_allowed:
+            tier_name = user.get("tier", "starter").title()
+            return jsonify({
+                "error": f"Workspace quota exceeded! Your {tier_name} plan allows up to {max_allowed} workspaces (you currently have {len(user_ws)}). Upgrade plan or remove an existing workspace."
+            }), 403
+
     data = request.get_json(force=True, silent=True) or {}
     template_type = data.get("template", "blank")
     ws_name = (data.get("name") or "").strip() or f"{template_type}_project"
@@ -8235,7 +10076,7 @@ def create_workspace_template():
             with open(os.path.join(dest_dir, "src", "App.tsx"), "w", encoding="utf-8") as f:
                 f.write("export default function App() {\n  return (\n    <main className='p-8'>\n      <h1 className='text-2xl font-bold'>Hello Antigravity</h1>\n      <p>Workspace ready for AI Pair Programming.</p>\n    </main>\n  );\n}\n")
             with open(os.path.join(dest_dir, "README.md"), "w", encoding="utf-8") as f:
-                f.write(f"# {ws_name}\n\nReact + TypeScript + Vite project initialized in Antigravity Cockpit.\n")
+                f.write(f"# {ws_name}\n\nReact + TypeScript + Vite project initialized in Webigo AI Workspaces.\n")
         elif template_type == "node":
             os.makedirs(os.path.join(dest_dir, "src"), exist_ok=True)
             with open(os.path.join(dest_dir, "package.json"), "w", encoding="utf-8") as f:
@@ -8250,17 +10091,17 @@ def create_workspace_template():
             with open(os.path.join(dest_dir, "src", "index.js"), "w", encoding="utf-8") as f:
                 f.write("import express from 'express';\nconst app = express();\napp.use(express.json());\napp.get('/', (req, res) => res.json({ status: 'ok', project: '" + ws_name + "' }));\nconst PORT = process.env.PORT || 3000;\napp.listen(PORT, () => console.log(`Server listening on ${PORT}`));\n")
             with open(os.path.join(dest_dir, "README.md"), "w", encoding="utf-8") as f:
-                f.write(f"# {ws_name}\n\nNode.js Express API initialized in Antigravity Cockpit.\n")
+                f.write(f"# {ws_name}\n\nNode.js Express API initialized in Webigo AI Workspaces.\n")
         elif template_type == "python":
             with open(os.path.join(dest_dir, "app.py"), "w", encoding="utf-8") as f:
                 f.write("from flask import Flask, jsonify\n\napp = Flask(__name__)\n\n@app.route('/')\ndef home():\n    return jsonify({'message': 'Hello from " + ws_name + "', 'status': 'ready'})\n\nif __name__ == '__main__':\n    app.run(host='0.0.0.0', port=5000, debug=True)\n")
             with open(os.path.join(dest_dir, "requirements.txt"), "w", encoding="utf-8") as f:
                 f.write("flask>=3.0.0\nrequests>=2.31.0\npytest>=8.0.0\n")
             with open(os.path.join(dest_dir, "README.md"), "w", encoding="utf-8") as f:
-                f.write(f"# {ws_name}\n\nPython service created in Antigravity Cockpit.\n")
+                f.write(f"# {ws_name}\n\nPython service created in Webigo AI Workspaces.\n")
         else:
             with open(os.path.join(dest_dir, "README.md"), "w", encoding="utf-8") as f:
-                f.write(f"# {ws_name}\n\nWorkspace created in Antigravity Cockpit.\n")
+                f.write(f"# {ws_name}\n\nWorkspace created in Webigo AI Workspaces.\n")
             with open(os.path.join(dest_dir, ".gitignore"), "w", encoding="utf-8") as f:
                 f.write("node_modules/\n__pycache__/\n.env\n*.log\n")
 
@@ -8277,7 +10118,8 @@ def create_workspace_template():
             "dir_count": stats["dir_count"],
             "size_bytes": stats["size_bytes"],
             "primary_language": stats["primary_language"],
-            "synced_agents": []
+            "synced_agents": [],
+            "owner": user.get("username", "admin") if user else "admin"
         }
         WORKSPACES[slug_id] = ws_obj
         save_workspaces()
@@ -8287,6 +10129,7 @@ def create_workspace_template():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/workspaces/<ws_id>/tree", methods=["GET"])
+@require_auth
 def get_workspace_tree_route(ws_id):
     if ws_id not in WORKSPACES:
         load_workspaces()
@@ -8302,6 +10145,7 @@ def get_workspace_tree_route(ws_id):
     return jsonify({"workspace": ws, "tree": tree})
 
 @app.route("/api/workspaces/<ws_id>/file", methods=["GET"])
+@require_auth
 def get_workspace_file_content(ws_id):
     if ws_id not in WORKSPACES:
         load_workspaces()
@@ -8381,6 +10225,7 @@ def deploy_workspace_to_targets(ws_id, target="agent-1", clean_first=False):
     return results
 
 @app.route("/api/workspaces/<ws_id>/deploy", methods=["POST"])
+@require_auth
 def deploy_workspace_route(ws_id):
     data = request.get_json(force=True, silent=True) or {}
     target = data.get("target", "agent-1")
@@ -8393,6 +10238,7 @@ def deploy_workspace_route(ws_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/workspaces/<ws_id>/pull", methods=["POST"])
+@require_auth
 def pull_workspace_route(ws_id):
     data = request.get_json(force=True, silent=True) or {}
     agent_id = data.get("agent_id", "agent-1")
@@ -8436,6 +10282,7 @@ def pull_workspace_route(ws_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/workspaces/<ws_id>/download", methods=["GET"])
+@require_auth
 def download_workspace_route(ws_id):
     ws = WORKSPACES.get(ws_id)
     if not ws:
@@ -8459,7 +10306,98 @@ def download_workspace_route(ws_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/workspaces/<ws_id>/bundle", methods=["GET"])
+@require_auth
+def get_workspace_bundle(ws_id):
+    ws = WORKSPACES.get(ws_id)
+    if not ws:
+        load_workspaces()
+        ws = WORKSPACES.get(ws_id)
+    if not ws:
+        return jsonify({"error": "Workspace not found"}), 404
+
+    ws_dir = os.path.join(WORKSPACES_DIR, ws_id)
+    if not os.path.exists(ws_dir):
+        return jsonify({"error": "Workspace directory missing"}), 404
+
+    files_dict = {}
+    total_size = 0
+    max_total_size = 25 * 1024 * 1024
+    for root, dirs, files in os.walk(ws_dir):
+        dirs[:] = [d for d in dirs if d not in [".git", "node_modules", "__pycache__", ".next", "dist", "build"]]
+        for f in files:
+            full_p = os.path.join(root, f)
+            rel_p = os.path.relpath(full_p, ws_dir).replace("\\", "/")
+            try:
+                sz = os.path.getsize(full_p)
+                if sz > 2 * 1024 * 1024:
+                    continue
+                total_size += sz
+                if total_size > max_total_size:
+                    break
+                with open(full_p, "r", encoding="utf-8", errors="ignore") as fh:
+                    files_dict[rel_p] = fh.read()
+            except Exception:
+                pass
+
+    return jsonify({
+        "success": True,
+        "workspace_id": ws_id,
+        "workspace_name": ws.get("name"),
+        "files": files_dict
+    })
+
+@app.route("/api/workspaces/import_bundle", methods=["POST"])
+@require_auth
+def import_workspace_bundle():
+    user = get_current_user()
+    data = request.get_json(force=True, silent=True) or {}
+    ws_name = (data.get("name") or "").strip() or "puter_project"
+    files = data.get("files") or {}
+    ws_desc = (data.get("description") or "Imported from Puter Cloud Drive").strip()
+
+    if not files:
+        return jsonify({"error": "No files provided in bundle"}), 400
+
+    slug_base = re.sub(r'[^a-zA-Z0-9_\-]', '_', ws_name).lower()[:24]
+    slug_id = f"ws_{slug_base}_{int(time.time()) % 100000}"
+    dest_dir = os.path.join(WORKSPACES_DIR, slug_id)
+
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        for rel_p, content in files.items():
+            rel_p = os.path.normpath(rel_p).lstrip("/\\")
+            if ".." in rel_p:
+                continue
+            full_p = os.path.join(dest_dir, rel_p)
+            os.makedirs(os.path.dirname(full_p), exist_ok=True)
+            with open(full_p, "w", encoding="utf-8") as f:
+                f.write(content)
+
+        stats = scan_workspace_stats(dest_dir)
+        ws_obj = {
+            "id": slug_id,
+            "name": ws_name,
+            "description": ws_desc,
+            "source": "puter_cloud",
+            "created_at": time.time(),
+            "updated_at": time.time(),
+            "file_count": stats["file_count"],
+            "dir_count": stats["dir_count"],
+            "size_bytes": stats["size_bytes"],
+            "primary_language": stats["primary_language"],
+            "synced_agents": [],
+            "owner": user.get("username", "admin") if user else "admin"
+        }
+        WORKSPACES[slug_id] = ws_obj
+        save_workspaces()
+        return jsonify({"success": True, "workspace": ws_obj})
+    except Exception as e:
+        shutil.rmtree(dest_dir, ignore_errors=True)
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/workspaces/<ws_id>", methods=["DELETE"])
+@require_auth
 def delete_workspace_route(ws_id):
     if ws_id not in WORKSPACES:
         load_workspaces()
@@ -8473,6 +10411,7 @@ def delete_workspace_route(ws_id):
     return jsonify({"success": True, "deleted_id": ws_id})
 
 @app.route("/api/workspaces/<ws_id>/rename", methods=["POST"])
+@require_auth
 def rename_workspace_route(ws_id):
     if ws_id not in WORKSPACES:
         load_workspaces()
@@ -8516,6 +10455,7 @@ if CeoOrchestrator:
         print(f"[CEO Engine] Warning: Failed to start CEO supervisor: {e}")
 
 @app.route("/api/ceo/order", methods=["POST"])
+@require_auth
 def ceo_post_directive():
     if not ceo_orchestrator:
         return jsonify({"error": "CEO Orchestrator engine not initialized"}), 503
@@ -8547,6 +10487,7 @@ def ceo_post_directive():
     })
 
 @app.route("/api/ceo/status", methods=["GET"])
+@require_auth
 def ceo_get_status():
     if not ceo_orchestrator:
         return jsonify({"error": "CEO Orchestrator engine not initialized"}), 503
@@ -8571,6 +10512,7 @@ def ceo_get_status():
     })
 
 @app.route("/api/ceo/heartbeat", methods=["POST"])
+@require_auth
 def ceo_trigger_heartbeat():
     if not ceo_supervisor:
         return jsonify({"error": "CEO Heartbeat supervisor not initialized"}), 503
@@ -8578,6 +10520,7 @@ def ceo_trigger_heartbeat():
     return jsonify({"success": True, "pulse": pulse_res})
 
 @app.route("/api/ceo/tasks", methods=["GET"])
+@require_auth
 def ceo_get_tasks():
     if not ceo_orchestrator:
         return jsonify({"error": "CEO Orchestrator engine not initialized"}), 503
@@ -8598,6 +10541,7 @@ def ceo_get_tasks():
     return jsonify({"tasks": [t.to_dict() for t in tasks]})
 
 @app.route("/api/ceo/tasks/<order_id>/action", methods=["POST"])
+@require_auth
 def ceo_task_action(order_id):
     if not ceo_orchestrator:
         return jsonify({"error": "CEO Orchestrator engine not initialized"}), 503
@@ -8630,6 +10574,7 @@ def ceo_task_action(order_id):
     return jsonify({"error": f"Unknown action: {action}"}), 400
 
 @app.route("/api/ceo/role", methods=["POST"])
+@require_auth
 def ceo_update_role():
     data = request.get_json(force=True, silent=True) or {}
     agent_id = data.get("agent_id")
@@ -8654,6 +10599,7 @@ def ceo_update_role():
     return jsonify({"success": True, "agent": agent})
 
 @app.route("/api/ceo/org", methods=["GET"])
+@require_auth
 def ceo_get_org():
     roles = ROLE_DEFINITIONS if ROLE_DEFINITIONS else []
     enriched_agents = []
@@ -8679,6 +10625,7 @@ def ceo_get_org():
     })
 
 @app.route("/api/ceo/prompts/<prompt_name>", methods=["GET"])
+@require_auth
 def ceo_get_prompt(prompt_name):
     allowed = ["AGENTS.md", "SOUL.md", "HEARTBEAT.md"]
     if prompt_name not in allowed:

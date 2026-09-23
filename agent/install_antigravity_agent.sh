@@ -191,7 +191,7 @@ websockify --web=/usr/share/novnc 6080 localhost:5900 &
 sleep 1
 
 if [ -f "/usr/local/bin/antigravity" ]; then
-    /usr/local/bin/antigravity --no-sandbox &
+    /usr/local/bin/antigravity --no-sandbox /home/ubuntu/workspace &
 fi
 
 wait

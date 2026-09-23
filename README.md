@@ -240,9 +240,15 @@ Cockpit Workspaces Store (/usr/local/share/cockpit/workspaces/<ws-id>/)
 |---|---|---|
 | `/api/workspaces` | `GET` | List all stored workspaces with stats |
 | `/api/workspaces/upload` | `POST` | Upload a project archive (multipart or base64 JSON) |
-| `/api/workspaces/git_clone` | `POST` | Clone a Git repository (shorthand `owner/repo`, branch, PAT support) |
+| `/api/workspaces/git_clone` | `POST` | Clone a Git repository (shorthand `owner/repo`, branch, PAT support, auto-inherits global token) |
 | `/api/workspaces/<id>/git_pull` | `POST` | Pull latest commits from upstream Git remote and auto-sync mounted agents |
+| `/api/workspaces/<id>/git_commit` | `POST` | Stage and commit workspace changes with designated author identity |
+| `/api/workspaces/<id>/git_push` | `POST` | Push commits to upstream Git remote using configured credentials |
 | `/api/workspaces/<id>/git_status` | `GET` | Return Git branch, latest commit SHA, commit author, message, and dirty state |
+| `/api/git/config` | `GET`, `POST` | Manage global Git credentials (PAT, author name/email) and sync to all agent nodes |
+| `/api/auth/login` | `POST` | Authenticate user and issue secure session cookie / bearer token |
+| `/api/auth/logout` | `POST` | Invalidate active session |
+| `/api/auth/me` | `GET` | Return current authenticated user profile and roles |
 | `/api/workspaces/create_template` | `POST` | Scaffold a starter template |
 | `/api/workspaces/<id>/tree` | `GET` | Return file-tree JSON for the Code Inspector |
 | `/api/workspaces/<id>/file` | `GET` | Read a file's content (path-traversal protected) |
@@ -256,12 +262,16 @@ Cockpit Workspaces Store (/usr/local/share/cockpit/workspaces/<ws-id>/)
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/workspace/deploy` | `POST` | Receives `{"archive": "<b64_tar_gz>", "workspace_name": "...", "workspace_id": "...", "clean_first": false}`. Extracts to `/home/ubuntu/workspace`, sets `ubuntu:ubuntu` ownership, writes `.cockpit_workspace.json`. |
+| `/workspace/deploy` | `POST` | Receives `{"archive": "<b64_tar_gz>", "workspace_name": "...", "workspace_id": "...", "clean_first": false}`. Extracts to `/home/ubuntu/workspace`, binds Antigravity IDE, writes `.agents/rules/cockpit_workspace.md`, and sets `ubuntu:ubuntu` ownership. |
 | `/workspace/status` | `GET` | Returns active workspace ID, name, file count, size, deploy timestamp. |
 | `/workspace/export` | `GET` | Streams back a base64 tar.gz of the current agent workspace (excludes `.git`, `node_modules`, `__pycache__`). |
 | `/workspace/clean` | `POST` | Removes all items from the agent workspace (preserves the `media/` subfolder). |
-| `/workspace/git_clone` | `POST` | Clone a Git repository directly into `/home/ubuntu/workspace` on the agent container. |
+| `/workspace/git_clone` | `POST` | Clone a Git repository directly into `/home/ubuntu/workspace` on the agent container and bind IDE. |
 | `/workspace/git_pull` | `POST` | Run `git pull` directly inside the agent workspace. |
+| `/workspace/git_commit` | `POST` | Run `git add -A` and `git commit` directly inside the agent workspace. |
+| `/workspace/git_push` | `POST` | Run `git push` directly from the agent workspace. |
+| `/workspace/git_status` | `GET` | Return git branch, dirty status, and latest commit info from the agent. |
+| `/git/credentials` | `POST` | Configure `~/.git-credentials`, `credential.helper store`, `user.name`, and `user.email` for `ubuntu` and `root` users. |
 
 ### Tech stack detection
 
@@ -272,7 +282,25 @@ The Cockpit auto-detects the primary language/framework by inspecting:
 - `go.mod` → Go
 - `index.html` (fallback) → HTML5/Frontend
 
-### Agent workspace path
+### Agent workspace binding guarantee
 
-Project files land at **`/home/ubuntu/workspace`** (symlinked / mirrored to `/root/workspace`) so both the `ubuntu` GUI desktop and root shell tools can reach them. The installer script (`agent/install_antigravity_agent.sh`) creates this directory and sets proper ownership automatically.
+1. **IDE Binding**: When a workspace is deployed, the agent bridge automatically executes `/usr/local/bin/antigravity -r /home/ubuntu/workspace` on `DISPLAY=:1` under user `ubuntu`, mounting the folder in Antigravity's active window and file tree.
+2. **Customization Rules**: Generates `/home/ubuntu/workspace/.agents/rules/cockpit_workspace.md` (conforming to the Antigravity Customization System), instructing the AI agent that all file edits, terminal commands, and tool calls are strictly confined to `/home/ubuntu/workspace`.
+3. **Execution Grounding**: Dispatched tasks include explicit workspace boundaries in their system directives.
+
+### User Authentication & NextAuth / ConvexDB Fullstack Setup
+
+- **Local Proxmox Deployment**: Cockpit can run 100% locally on Proxmox VE (CT 150) without external cloud dependencies:
+  - **Database**: Self-hosted local **ConvexDB** backend (`http://127.0.0.1:3210`) storing users, workspaces, git PAT secrets, agent fleet topology, and paperclip work orders with zero cloud leakage.
+  - **Auth**: **NextAuth.js** (Auth.js) with Credentials provider (PBKDF2/Bcrypt hash verification against Convex `users` table) and optional GitHub OAuth provider with automatic Personal Access Token (PAT) capture for private repository operations.
+  - **Frontend**: Full-stack Next.js 14/15 application in `cockpit-web/` featuring dark glassmorphism styling, live agent noVNC desktop viewer, Git clone/pull/commit/push controls, and Paperclip CEO executive orchestration.
+
+#### Quick Proxmox Fullstack Deploy:
+```bash
+# On Proxmox Host (192.168.178.105):
+bash /opt/antigravity-cockpit/scripts/deploy_proxmox_fullstack.sh
+```
+This automatically sets up `convex-backend.service` (:3210) and `cockpit-next.service` (:3000), seeds the default administrator account (`admin@antigravity.cockpit` / `antigravity`), and configures system auto-restart on boot.
+
+
 

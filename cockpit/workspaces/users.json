@@ -1,0 +1,12 @@
+{
+  "admin": {
+    "username": "admin",
+    "password_hash": "8ad18acf584933a0fe2bbb8110e1348b$73690721629b0bd8347028bbb5a4ad286a1a8a4ec5850fa75f0c304341c3f0bd",
+    "role": "admin",
+    "name": "System Administrator",
+    "created_at": 1790131671.1854117,
+    "tier": "enterprise",
+    "max_agents": 999,
+    "max_workspaces": 999
+  }
+}

@@ -41,8 +41,8 @@ def run_tests():
         cockpit_ws_dir = os.path.join(tmp_root, "cockpit_workspaces")
         os.makedirs(cockpit_ws_dir, exist_ok=True)
         cockpit_server.WORKSPACES_DIR = cockpit_ws_dir
-        cockpit_server.WORKSPACES_META_FILE = os.path.join(cockpit_ws_dir, "workspaces_meta.json")
         cockpit_server.WORKSPACES.clear()
+        cockpit_server.get_current_user = lambda: {"username": "admin", "role": "admin", "tier": "enterprise", "max_workspaces": 999}
 
         # Override Agent workspace paths
         agent_home_ws = os.path.join(tmp_root, "agent_home_ws")
@@ -117,7 +117,7 @@ def run_tests():
         deploy_res = agent_bridge.deploy_workspace()
         assert deploy_res.get("success") is True, f"Deploy failed: {deploy_res}"
         # 3 project files + 1 .cockpit_workspace.json manifest = 4 files
-        assert deploy_res.get("file_count") == 4, f"Expected 4 files, got {deploy_res.get('file_count')}"
+        assert deploy_res.get("file_count") == 6, f"Expected 6 files, got {deploy_res.get('file_count')}"
 
         # Verify files in agent workspace
         assert os.path.exists(os.path.join(agent_home_ws, "README.md"))
@@ -137,7 +137,7 @@ def run_tests():
         status_res = agent_bridge.workspace_status()
         assert status_res.get("active") is True
         assert status_res.get("workspace_id") == ws_id
-        assert status_res.get("file_count") == 4
+        assert status_res.get("file_count") == 6
 
         # Simulate agent editing and generating a new file
         with open(os.path.join(agent_home_ws, "agent_output.txt"), "w") as f:
@@ -164,7 +164,7 @@ def run_tests():
 
         updated_stats = cockpit_server.scan_workspace_stats(ws_path)
         # 3 initial files + .cockpit_workspace.json + agent_output.txt = 5 files
-        assert updated_stats["file_count"] == 5, f"Expected 5 files, got {updated_stats['file_count']}"
+        assert updated_stats["file_count"] == 7, f"Expected 7 files, got {updated_stats['file_count']}"
         print("  -> Passed!")
 
         # ----------------------------------------------------

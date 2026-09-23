@@ -1,0 +1,24 @@
+import en from './en';
+import de from './de';
+import es from './es';
+import fr from './fr';
+import ar from './ar';
+import zh from './zh';
+import hi from './hi';
+import bn from './bn';
+import pt from './pt';
+import ru from './ru';
+import ur from './ur';
+import id from './id';
+import ja from './ja';
+import sw from './sw';
+import mr from './mr';
+import te from './te';
+import tr from './tr';
+import ko from './ko';
+import ta from './ta';
+import vi from './vi';
+import it from './it';
+
+export const locales = { en, de, es, fr, ar, zh, hi, bn, pt, ru, ur, id, ja, sw, mr, te, tr, ko, ta, vi, it };
+export type LocaleKey = keyof typeof locales;
