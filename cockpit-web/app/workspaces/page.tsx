@@ -21,10 +21,23 @@ import {
   X,
   Send
 } from "lucide-react";
+import { QueryErrorBoundary } from "@/components/QueryErrorBoundary";
 
-export default function WorkspacesPage() {
+function WorkspacesWithQuery() {
   const convexWorkspaces = useQuery(api.workspaces.listWorkspaces);
   const gitConfig = useQuery(api.git.getGitConfig);
+  return <WorkspacesView convexWorkspaces={convexWorkspaces} gitConfig={gitConfig} />;
+}
+
+export default function WorkspacesPage() {
+  return (
+    <QueryErrorBoundary fallback={<WorkspacesView convexWorkspaces={[]} gitConfig={null} />}>
+      <WorkspacesWithQuery />
+    </QueryErrorBoundary>
+  );
+}
+
+function WorkspacesView({ convexWorkspaces, gitConfig }: { convexWorkspaces: any; gitConfig: any }) {
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showCommitModal, setShowCommitModal] = useState<any | null>(null);

@@ -16,10 +16,23 @@ import {
   GitBranch,
   Lock
 } from "lucide-react";
+import { QueryErrorBoundary } from "@/components/QueryErrorBoundary";
 
-export default function SettingsPage() {
+function SettingsWithQuery() {
   const gitConfig = useQuery(api.git.getGitConfig);
   const users = useQuery(api.users.listUsers) || [];
+  return <SettingsView gitConfig={gitConfig} users={users} />;
+}
+
+export default function SettingsPage() {
+  return (
+    <QueryErrorBoundary fallback={<SettingsView gitConfig={null} users={[]} />}>
+      <SettingsWithQuery />
+    </QueryErrorBoundary>
+  );
+}
+
+function SettingsView({ gitConfig, users }: { gitConfig: any; users: any[] }) {
 
   const [provider, setProvider] = useState("github");
   const [token, setToken] = useState("");

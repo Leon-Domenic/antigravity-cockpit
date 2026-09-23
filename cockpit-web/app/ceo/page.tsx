@@ -15,9 +15,22 @@ import {
   Layers,
   Sparkles
 } from "lucide-react";
+import { QueryErrorBoundary } from "@/components/QueryErrorBoundary";
+
+function CeoWithQuery() {
+  const convexOrders = useQuery(api.ceo.listWorkOrders);
+  return <CeoView convexOrders={convexOrders} />;
+}
 
 export default function CeoPage() {
-  const convexOrders = useQuery(api.ceo.listWorkOrders);
+  return (
+    <QueryErrorBoundary fallback={<CeoView convexOrders={[]} />}>
+      <CeoWithQuery />
+    </QueryErrorBoundary>
+  );
+}
+
+function CeoView({ convexOrders }: { convexOrders: any }) {
   const [title, setTitle] = useState("");
   const [directive, setDirective] = useState("");
   const [assignedTo, setAssignedTo] = useState("agent-1");

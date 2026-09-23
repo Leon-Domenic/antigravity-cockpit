@@ -19,77 +19,92 @@ import {
   Terminal,
   X
 } from "lucide-react";
+import { QueryErrorBoundary } from "@/components/QueryErrorBoundary";
+
+const DEFAULT_AGENTS = [
+  {
+    agentId: "agent-1",
+    vmid: 151,
+    name: "Webigo Prime",
+    type: "webigo",
+    vmType: "lxc",
+    role: "Architecture & Core Logic",
+    ip: "192.168.178.169",
+    port: 8000,
+    vncPort: 6080,
+    status: "running",
+  },
+  {
+    agentId: "agent-2",
+    vmid: 152,
+    name: "Webigo SecOps",
+    type: "webigo",
+    vmType: "lxc",
+    role: "Code Review & Security Audits",
+    ip: "192.168.178.170",
+    port: 8000,
+    vncPort: 6080,
+    status: "idle",
+  },
+  {
+    agentId: "agent-3",
+    vmid: 153,
+    name: "Codex Engine",
+    type: "codex",
+    vmType: "lxc",
+    role: "API Integration & Test Automation",
+    ip: "192.168.178.171",
+    port: 8000,
+    vncPort: 6080,
+    status: "idle",
+  },
+  {
+    agentId: "agent-5",
+    vmid: 154,
+    name: "Hermes Autonomous (KVM)",
+    type: "hermes",
+    vmType: "qemu",
+    role: "End-to-End Execution & Self-Correction",
+    ip: "192.168.178.172",
+    port: 8000,
+    vncPort: 6080,
+    status: "running",
+  },
+  {
+    agentId: "agent-6",
+    vmid: 155,
+    name: "Open Claw Research",
+    type: "claw",
+    vmType: "qemu",
+    role: "Deep Web & Multimodal Research",
+    ip: "192.168.178.173",
+    port: 8000,
+    vncPort: 6080,
+    status: "idle",
+  },
+];
+
+function FleetWithQuery() {
+  const convexAgents = useQuery(api.agents.listAgents);
+  return <FleetView rawAgents={convexAgents} />;
+}
 
 export default function FleetPage() {
-  const convexAgents = useQuery(api.agents.listAgents);
+  return (
+    <QueryErrorBoundary fallback={<FleetView rawAgents={null} />}>
+      <FleetWithQuery />
+    </QueryErrorBoundary>
+  );
+}
+
+function FleetView({ rawAgents }: { rawAgents: any[] | undefined | null }) {
   const { t } = useLanguage();
   const [selectedVncAgent, setSelectedVncAgent] = useState<any | null>(null);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   // Fallback if Convex is initializing
-  const agents = (convexAgents && convexAgents.length > 0) ? convexAgents : [
-    {
-      agentId: "agent-1",
-      vmid: 151,
-      name: "Webigo Prime",
-      type: "webigo",
-      vmType: "lxc",
-      role: "Architecture & Core Logic",
-      ip: "192.168.178.169",
-      port: 8000,
-      vncPort: 6080,
-      status: "running",
-    },
-    {
-      agentId: "agent-2",
-      vmid: 152,
-      name: "Webigo SecOps",
-      type: "webigo",
-      vmType: "lxc",
-      role: "Code Review & Security Audits",
-      ip: "192.168.178.170",
-      port: 8000,
-      vncPort: 6080,
-      status: "idle",
-    },
-    {
-      agentId: "agent-3",
-      vmid: 153,
-      name: "Codex Engine",
-      type: "codex",
-      vmType: "lxc",
-      role: "API Integration & Test Automation",
-      ip: "192.168.178.171",
-      port: 8000,
-      vncPort: 6080,
-      status: "idle",
-    },
-    {
-      agentId: "agent-5",
-      vmid: 154,
-      name: "Hermes Autonomous (KVM)",
-      type: "hermes",
-      vmType: "qemu",
-      role: "End-to-End Execution & Self-Correction",
-      ip: "192.168.178.172",
-      port: 8000,
-      vncPort: 6080,
-      status: "idle",
-    },
-    {
-      agentId: "agent-6",
-      vmid: 155,
-      name: "Open Claw Research (KVM)",
-      type: "open-claw",
-      vmType: "qemu",
-      role: "Deep Research & Multi-Modal Browser",
-      ip: "192.168.178.173",
-      port: 8000,
-      vncPort: 6080,
-      status: "idle",
-    },
-  ];
+  const agents = (rawAgents && rawAgents.length > 0) ? rawAgents : DEFAULT_AGENTS;
 
   const handleEnsureWorkspace = async (ag: any) => {
     setSyncingId(ag.agentId);
