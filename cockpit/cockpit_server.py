@@ -641,6 +641,7 @@ HTML_TEMPLATE = """
                             <span><i class="fa-solid fa-memory text-slate-500 mr-1"></i> RAM: <span id="agent-page-ram" class="text-slate-200">-- MB</span></span>
                             <span><i class="fa-solid fa-clock text-slate-500 mr-1"></i> Uptime: <span id="agent-page-uptime" class="text-slate-200">--</span></span>
                             <span><i class="fa-solid fa-folder-tree text-emerald-400 mr-1"></i> Workspace: <span id="agent-page-ws-badge" class="text-emerald-400 font-semibold cursor-pointer hover:underline" onclick="openWorkspacesModal(currentView)" title="Click to manage or deploy project workspace">Default (None)</span></span>
+                            <span><i class="fa-solid fa-bolt text-amber-400 mr-1"></i> Quota: <span id="agent-page-quota-badge" class="text-emerald-400 font-semibold cursor-pointer hover:underline" onclick="refreshAgentQuota(true)" title="Click to refresh model quota">--%</span></span>
                         </div>
                     </div>
                 </div>
@@ -739,7 +740,113 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
 
-                    <!-- Skills & Capabilities Card Beneath Auth Manager -->
+                    <!-- Model Quotas & Token Headroom Tracker Card -->
+                    <div class="glass rounded-2xl p-4 space-y-3.5" id="agent-quota-card">
+                        <div class="flex justify-between items-center">
+                            <div class="flex items-center gap-2.5">
+                                <div class="w-8 h-8 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 text-sm shadow-inner">
+                                    <i class="fa-solid fa-bolt-lightning"></i>
+                                </div>
+                                <div>
+                                    <h3 class="text-xs font-semibold text-white uppercase tracking-wider flex items-center gap-2">
+                                        Model Quotas & Token Headroom
+                                    </h3>
+                                    <div class="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
+                                        <span id="quota-tier-name" class="font-mono text-slate-300">Google AI Pro (Helium)</span>
+                                        <span class="text-slate-600">•</span>
+                                        <span id="quota-updated-time" class="text-slate-500 font-mono">Checking quotas...</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button onclick="refreshAgentQuota(true)" id="quota-refresh-btn" class="px-3 py-1.5 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 border hover:bg-white/5 text-slate-300" style="background-color: var(--bg-input); border-color: var(--border-base);" title="Refresh live quota from Google Cloud Code API">
+                                    <i class="fa-solid fa-rotate-right" id="quota-refresh-icon"></i> Refresh Quotas
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- 4 Core Model Progress Meters -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3" id="quota-meters-grid">
+                            <!-- Gemini 3.8 Flash -->
+                            <div class="p-3 rounded-xl border bg-black/25 flex flex-col justify-between space-y-2" style="border-color: var(--border-base);">
+                                <div class="flex justify-between items-center text-xs">
+                                    <span class="font-semibold text-slate-200 flex items-center gap-1.5">
+                                        <i class="fa-solid fa-atom text-indigo-400 text-[11px]"></i> Gemini 3.8 Flash
+                                    </span>
+                                    <span id="quota-val-gemini-flash" class="font-mono font-bold text-emerald-400">--%</span>
+                                </div>
+                                <div class="w-full bg-slate-800/80 rounded-full h-2 overflow-hidden">
+                                    <div id="quota-bar-gemini-flash" class="bg-gradient-to-r from-emerald-500 to-teal-400 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                                </div>
+                                <div class="flex justify-between items-center text-[10px] text-slate-400 font-mono">
+                                    <span>1,048,576 Context</span>
+                                    <span id="quota-reset-gemini-flash" class="text-slate-500">Daily reset</span>
+                                </div>
+                            </div>
+
+                            <!-- Gemini 3.1 Pro -->
+                            <div class="p-3 rounded-xl border bg-black/25 flex flex-col justify-between space-y-2" style="border-color: var(--border-base);">
+                                <div class="flex justify-between items-center text-xs">
+                                    <span class="font-semibold text-slate-200 flex items-center gap-1.5">
+                                        <i class="fa-solid fa-brain text-purple-400 text-[11px]"></i> Gemini 3.1 Pro
+                                    </span>
+                                    <span id="quota-val-gemini-pro" class="font-mono font-bold text-emerald-400">--%</span>
+                                </div>
+                                <div class="w-full bg-slate-800/80 rounded-full h-2 overflow-hidden">
+                                    <div id="quota-bar-gemini-pro" class="bg-gradient-to-r from-emerald-500 to-purple-400 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                                </div>
+                                <div class="flex justify-between items-center text-[10px] text-slate-400 font-mono">
+                                    <span>1,048,576 Context</span>
+                                    <span id="quota-reset-gemini-pro" class="text-slate-500">Daily reset</span>
+                                </div>
+                            </div>
+
+                            <!-- Claude 4.6 Thinking / Sonnet -->
+                            <div class="p-3 rounded-xl border bg-black/25 flex flex-col justify-between space-y-2" style="border-color: var(--border-base);">
+                                <div class="flex justify-between items-center text-xs">
+                                    <span class="font-semibold text-slate-200 flex items-center gap-1.5">
+                                        <i class="fa-solid fa-feather-pointed text-amber-400 text-[11px]"></i> Claude Opus/Sonnet 4.6
+                                    </span>
+                                    <span id="quota-val-claude" class="font-mono font-bold text-amber-400">--%</span>
+                                </div>
+                                <div class="w-full bg-slate-800/80 rounded-full h-2 overflow-hidden">
+                                    <div id="quota-bar-claude" class="bg-gradient-to-r from-amber-500 to-orange-400 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                                </div>
+                                <div class="flex justify-between items-center text-[10px] text-slate-400 font-mono">
+                                    <span>250,000 Context</span>
+                                    <span id="quota-reset-claude" class="text-slate-500">Weekly reset</span>
+                                </div>
+                            </div>
+
+                            <!-- GPT-OSS 120B -->
+                            <div class="p-3 rounded-xl border bg-black/25 flex flex-col justify-between space-y-2" style="border-color: var(--border-base);">
+                                <div class="flex justify-between items-center text-xs">
+                                    <span class="font-semibold text-slate-200 flex items-center gap-1.5">
+                                        <i class="fa-solid fa-code text-cyan-400 text-[11px]"></i> GPT-OSS 120B
+                                    </span>
+                                    <span id="quota-val-gpt" class="font-mono font-bold text-cyan-400">--%</span>
+                                </div>
+                                <div class="w-full bg-slate-800/80 rounded-full h-2 overflow-hidden">
+                                    <div id="quota-bar-gpt" class="bg-gradient-to-r from-cyan-500 to-blue-400 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                                </div>
+                                <div class="flex justify-between items-center text-[10px] text-slate-400 font-mono">
+                                    <span>131,072 Context</span>
+                                    <span id="quota-reset-gpt" class="text-slate-500">Weekly reset</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- All Models Toggle Button & Collapsible List -->
+                        <div class="pt-2 border-t flex flex-col space-y-2" style="border-color: var(--border-base);">
+                            <button onclick="toggleAllModelsList()" class="text-[11px] text-slate-400 hover:text-slate-200 flex items-center justify-between py-1 transition">
+                                <span class="flex items-center gap-1.5"><i class="fa-solid fa-list-check text-slate-500"></i> Full Model Quota Registry (<span id="all-models-count">33</span>)</span>
+                                <i class="fa-solid fa-chevron-down transition-transform duration-200" id="all-models-chevron"></i>
+                            </button>
+                            <div id="all-models-container" class="hidden max-h-48 overflow-y-auto space-y-1 scrollbar-thin pr-1">
+                                <!-- Populated dynamically by JS -->
+                            </div>
+                        </div>
+                    </div>
                     <div class="glass rounded-2xl p-4 space-y-3">
                         <div class="flex justify-between items-center">
                             <h3 class="text-xs font-semibold text-white uppercase tracking-wider flex items-center gap-2">
@@ -2750,6 +2857,7 @@ HTML_TEMPLATE = """
 
                 updateDedicatedAgentLabels(viewId);
                 fetchCurrentLogs();
+                fetchAgentQuota(viewId);
             }
         }
 
@@ -2762,7 +2870,8 @@ HTML_TEMPLATE = """
             const info = fleetStatuses[agentId] || { power: "unknown", status: "checking", authenticated: false, metrics: {} };
             const isRunning = info.power === "running";
 
-            document.getElementById("agent-page-title").innerText = `${agent.name} (${agent.role})`;
+            const titleEl = document.getElementById("agent-page-title");
+            if (titleEl) titleEl.innerText = `${agent.name} (${agent.role})`;
             
             const pageIcon = document.getElementById("agent-page-icon");
             if (pageIcon) {
@@ -2777,53 +2886,75 @@ HTML_TEMPLATE = """
                 engBadge.innerHTML = `<i class="${eng.icon}"></i> ${eng.fullName || eng.name}`;
             }
 
-            document.getElementById("agent-page-vmid").innerText = agent.vmid;
-            document.getElementById("agent-page-ip").innerText = agent.ip;
-            document.getElementById("dispatcher-target-tag").innerText = agent.name;
+            const vmidEl = document.getElementById("agent-page-vmid");
+            if (vmidEl) vmidEl.innerText = agent.vmid;
+            const ipEl = document.getElementById("agent-page-ip");
+            if (ipEl) ipEl.innerText = agent.ip;
+            const targetEl = document.getElementById("dispatcher-target-tag");
+            if (targetEl) targetEl.innerText = agent.name;
 
             const m = info.metrics || {};
-            document.getElementById("agent-page-cpu").innerText = m.cpu !== undefined ? (m.cpu * 100).toFixed(1) + "%" : "--%";
-            document.getElementById("agent-page-ram").innerText = m.mem !== undefined ? Math.round(m.mem / (1024 * 1024)) + " MB" : "-- MB";
-            document.getElementById("agent-page-uptime").innerText = m.uptime ? Math.round(m.uptime / 60) + "m" : "--";
+            const cpuEl = document.getElementById("agent-page-cpu");
+            if (cpuEl) cpuEl.innerText = m.cpu !== undefined ? (m.cpu * 100).toFixed(1) + "%" : "--%";
+            const ramEl = document.getElementById("agent-page-ram");
+            if (ramEl) ramEl.innerText = m.mem !== undefined ? Math.round(m.mem / (1024 * 1024)) + " MB" : "-- MB";
+            const upEl = document.getElementById("agent-page-uptime");
+            if (upEl) upEl.innerText = m.uptime ? Math.round(m.uptime / 60) + "m" : "--";
 
             const powerBadge = document.getElementById("agent-page-power-badge");
-            if (isRunning) {
-                powerBadge.className = "px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5";
-                powerBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> ${info.status === 'busy' ? 'Busy' : 'Running'}`;
-            } else {
-                powerBadge.className = "px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-600/20 text-slate-400 border border-slate-600/30 flex items-center gap-1.5";
-                powerBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-slate-500"></span> Stopped`;
+            if (powerBadge) {
+                if (isRunning) {
+                    powerBadge.className = "px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5";
+                    powerBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> ${info.status === 'busy' ? 'Busy' : 'Running'}`;
+                } else {
+                    powerBadge.className = "px-2.5 py-0.5 rounded-full text-xs font-semibold bg-slate-600/20 text-slate-400 border border-slate-600/30 flex items-center gap-1.5";
+                    powerBadge.innerHTML = `<span class="w-2 h-2 rounded-full bg-slate-500"></span> Stopped`;
+                }
             }
 
             const authBadge = document.getElementById("agent-page-auth-badge");
             const authPill = document.getElementById("auth-status-pill");
             if (info.authenticated) {
-                authBadge.className = "px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
-                authBadge.innerText = "≡ƒöæ Auth Active";
-                authPill.className = "text-[11px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-mono";
-                authPill.innerText = "Active";
+                if (authBadge) {
+                    authBadge.className = "px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+                    authBadge.innerHTML = `<i class="fa-solid fa-key mr-1"></i> Auth Active`;
+                }
+                if (authPill) {
+                    authPill.className = "text-[11px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-mono";
+                    authPill.innerText = "Active";
+                }
             } else {
-                authBadge.className = "px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
-                authBadge.innerText = "ΓÜá∩╕Å Needs Auth";
-                authPill.className = "text-[11px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 font-mono";
-                authPill.innerText = "Needs Auth";
+                if (authBadge) {
+                    authBadge.className = "px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30";
+                    authBadge.innerHTML = `<i class="fa-solid fa-triangle-exclamation mr-1"></i> Needs Auth`;
+                }
+                if (authPill) {
+                    authPill.className = "text-[11px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 font-mono";
+                    authPill.innerText = "Needs Auth";
+                }
             }
 
             const powerBtn = document.getElementById("agent-page-power-btn");
-            if (isRunning) {
-                powerBtn.className = "px-3.5 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 rounded-xl text-xs font-medium transition flex items-center gap-1.5";
-                powerBtn.innerHTML = `<i class="fa-solid fa-power-off"></i> Stop`;
-            } else {
-                powerBtn.className = "px-3.5 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 rounded-xl text-xs font-medium transition flex items-center gap-1.5";
-                powerBtn.innerHTML = `<i class="fa-solid fa-play"></i> Start`;
+            if (powerBtn) {
+                if (isRunning) {
+                    powerBtn.className = "px-3.5 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30 rounded-xl text-xs font-medium transition flex items-center gap-1.5";
+                    powerBtn.innerHTML = `<i class="fa-solid fa-power-off"></i> Stop`;
+                } else {
+                    powerBtn.className = "px-3.5 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 rounded-xl text-xs font-medium transition flex items-center gap-1.5";
+                    powerBtn.innerHTML = `<i class="fa-solid fa-play"></i> Start`;
+                }
             }
 
             const popout = document.getElementById("agent-page-popout");
-            popout.href = `http://${agent.ip}:${agent.vnc_port}/vnc.html?autoconnect=true&resize=scale&reconnect=true`;
+            if (popout) {
+                popout.href = `http://${agent.ip}:${agent.vnc_port}/vnc.html?autoconnect=true&resize=scale&reconnect=true`;
+            }
 
             const overlay = document.getElementById("screen-stopped-overlay");
-            if (isRunning) overlay.classList.add("hidden");
-            else overlay.classList.remove("hidden");
+            if (overlay) {
+                if (isRunning) overlay.classList.add("hidden");
+                else overlay.classList.remove("hidden");
+            }
 
             updateAgentSkillsPreview(agentId);
             updateDedicatedWorkspaceBadge(agentId);
@@ -3265,6 +3396,138 @@ HTML_TEMPLATE = """
             alert(data.message || data.error || "Token applied");
             document.getElementById("dedicated-token-input").value = "";
             fetchAllStatus();
+        }
+
+        // ============================================================
+        // MODEL QUOTAS & TOKEN TRACKER LOGIC
+        // ============================================================
+        let currentAgentQuota = null;
+
+        async function fetchAgentQuota(agentId, forceRefresh = false) {
+            if (!agentId || agentId === "overview") return;
+            const refreshIcon = document.getElementById("quota-refresh-icon");
+            if (forceRefresh && refreshIcon) refreshIcon.classList.add("fa-spin");
+
+            try {
+                const url = `/api/agents/${agentId}/quota${forceRefresh ? '?force_refresh=true' : ''}`;
+                const res = await fetch(url);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (currentView === agentId) {
+                        renderAgentQuota(data);
+                    }
+                }
+            } catch (e) {
+                console.warn("Failed to fetch quota:", e);
+            } finally {
+                if (refreshIcon) refreshIcon.classList.remove("fa-spin");
+            }
+        }
+
+        function refreshAgentQuota(force = true) {
+            fetchAgentQuota(currentView, force);
+        }
+
+        function renderAgentQuota(data) {
+            currentAgentQuota = data;
+            if (!data || !data.authenticated) {
+                const subBadge = document.getElementById("agent-page-quota-badge");
+                if (subBadge) {
+                    subBadge.innerText = "No Auth";
+                    subBadge.className = "text-slate-500 font-semibold cursor-pointer hover:underline";
+                }
+                const tierEl = document.getElementById("quota-tier-name");
+                if (tierEl) tierEl.innerText = "Authentication Required";
+                return;
+            }
+
+            const tierEl = document.getElementById("quota-tier-name");
+            if (tierEl && data.tier) {
+                tierEl.innerText = `${data.tier.name || 'Antigravity'} (${data.tier.id || 'Active'})`;
+            }
+
+            const timeEl = document.getElementById("quota-updated-time");
+            if (timeEl && data.timestamp) {
+                const d = new Date(data.timestamp * 1000);
+                timeEl.innerText = `Updated ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+            }
+
+            const summary = data.summary || {};
+
+            function updateMeter(key, obj) {
+                const valEl = document.getElementById(`quota-val-${key}`);
+                const barEl = document.getElementById(`quota-bar-${key}`);
+                const resetEl = document.getElementById(`quota-reset-${key}`);
+
+                if (!obj) {
+                    if (valEl) valEl.innerText = "N/A";
+                    if (barEl) barEl.style.width = "0%";
+                    return;
+                }
+
+                const pct = obj.remaining_pct != null ? obj.remaining_pct : 100;
+                if (valEl) {
+                    valEl.innerText = `${pct}%`;
+                    valEl.className = pct > 50 ? "font-mono font-bold text-emerald-400" : (pct > 20 ? "font-mono font-bold text-amber-400" : "font-mono font-bold text-rose-400");
+                }
+                if (barEl) {
+                    barEl.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+                    if (pct <= 20) {
+                        barEl.className = "bg-gradient-to-r from-rose-500 to-red-400 h-2 rounded-full transition-all duration-500";
+                    }
+                }
+                if (resetEl && obj.reset_time) {
+                    const rDate = new Date(obj.reset_time);
+                    const now = new Date();
+                    const diffHours = Math.round((rDate - now) / (1000 * 60 * 60));
+                    resetEl.innerText = diffHours > 0 ? `Resets in ~${diffHours}h` : `Reset: ${rDate.toLocaleDateString()}`;
+                }
+            }
+
+            updateMeter("gemini-flash", summary.gemini_flash);
+            updateMeter("gemini-pro", summary.gemini_pro);
+            updateMeter("claude", summary.claude);
+            updateMeter("gpt", summary.gpt_oss);
+
+            const subBadge = document.getElementById("agent-page-quota-badge");
+            if (subBadge) {
+                const best = summary.gemini_flash || summary.gemini_pro || summary.claude;
+                if (best) {
+                    const bp = best.remaining_pct;
+                    subBadge.innerText = `${bp}%`;
+                    subBadge.className = bp > 50 ? "text-emerald-400 font-semibold cursor-pointer hover:underline" : (bp > 20 ? "text-amber-400 font-semibold cursor-pointer hover:underline" : "text-rose-400 font-semibold cursor-pointer hover:underline");
+                }
+            }
+
+            const allModels = data.models || {};
+            const countEl = document.getElementById("all-models-count");
+            if (countEl) countEl.innerText = Object.keys(allModels).length;
+
+            const allContainer = document.getElementById("all-models-container");
+            if (allContainer) {
+                allContainer.innerHTML = Object.values(allModels).map(m => {
+                    const p = m.remaining_pct != null ? m.remaining_pct : 100;
+                    const pColor = p > 50 ? "text-emerald-400" : (p > 20 ? "text-amber-400" : "text-rose-400");
+                    return `
+                        <div class="flex items-center justify-between text-[11px] p-1.5 rounded hover:bg-white/5 border border-transparent hover:border-white/10 font-mono">
+                            <span class="text-slate-300 truncate max-w-[200px]" title="${m.name}">${m.name}</span>
+                            <div class="flex items-center gap-3 flex-shrink-0">
+                                <span class="text-[10px] text-slate-500">${m.max_tokens ? (m.max_tokens >= 1000000 ? Math.round(m.max_tokens/1000000) + 'M' : Math.round(m.max_tokens/1000) + 'k') : ''}</span>
+                                <span class="${pColor} font-bold w-12 text-right">${p}%</span>
+                            </div>
+                        </div>
+                    `;
+                }).join("");
+            }
+        }
+
+        function toggleAllModelsList() {
+            const c = document.getElementById("all-models-container");
+            const chev = document.getElementById("all-models-chevron");
+            if (c) {
+                c.classList.toggle("hidden");
+                if (chev) chev.classList.toggle("rotate-180");
+            }
         }
 
         function reloadScreenIframe() {
@@ -5659,6 +5922,7 @@ def get_all_status():
 
         agent_status = "offline"
         auth_status = False
+        quota_summary = None
         if power == "running":
             try:
                 r_agent = requests.get(f"http://{agent['ip']}:{agent['port']}/status", timeout=1.2)
@@ -5666,6 +5930,7 @@ def get_all_status():
                     d = r_agent.json()
                     agent_status = d.get("status", "idle")
                     auth_status = d.get("authenticated", False)
+                    quota_summary = d.get("quota_summary")
             except Exception:
                 agent_status = "booting"
 
@@ -5674,6 +5939,7 @@ def get_all_status():
             "status": agent_status,
             "authenticated": auth_status,
             "metrics": metrics,
+            "quota_summary": quota_summary,
             "vm_type": agent.get("vm_type") or get_agent_vm_type(agent)
         }
     return jsonify(results)
@@ -6165,6 +6431,27 @@ def get_package_file(filename):
 def get_agents_list():
     load_agents_config()
     return jsonify({"agents": AGENTS})
+
+@app.route("/api/agents/<agent_id>/quota", methods=["GET", "POST"])
+def get_agent_quota_route(agent_id):
+    load_agents_config()
+    agent = next((a for a in AGENTS if a["id"] == agent_id), None)
+    if not agent:
+        return jsonify({"error": "Agent not found"}), 404
+    
+    force = request.args.get("force_refresh", "false").lower() in ["true", "1", "yes"]
+    try:
+        agent_ip = agent.get("ip")
+        agent_port = agent.get("port", 8000)
+        url = f"http://{agent_ip}:{agent_port}/quota"
+        if force:
+            url += "?force_refresh=true"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            return jsonify(r.json())
+        return jsonify({"error": f"Agent bridge returned status {r.status_code}"}), r.status_code
+    except Exception as e:
+        return jsonify({"error": f"Failed to connect to agent bridge: {str(e)}"}), 502
 
 @app.route("/api/agents/rename", methods=["POST"])
 def rename_agent_route():

@@ -247,14 +247,129 @@ def auto_confirm_permissions():
     except Exception:
         return False
 
+QUOTA_CACHE = {"timestamp": 0, "data": None}
+
+def fetch_model_quota(force_refresh=False):
+    global QUOTA_CACHE
+    now = time.time()
+    if not force_refresh and QUOTA_CACHE["data"] and (now - QUOTA_CACHE["timestamp"] < 60):
+        return QUOTA_CACHE["data"]
+
+    token_paths = [
+        "/root/.gemini/jetski-standalone-oauth-token",
+        "/home/ubuntu/.gemini/jetski-standalone-oauth-token"
+    ]
+    token = None
+    for p in token_paths:
+        if os.path.exists(p) and os.path.getsize(p) > 10:
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    tdata = json.load(f)
+                    if isinstance(tdata, dict):
+                        tok = tdata.get("token", {})
+                        if isinstance(tok, dict) and "access_token" in tok:
+                            token = tok["access_token"]
+                        elif "access_token" in tdata:
+                            token = tdata["access_token"]
+                        if token:
+                            break
+            except Exception:
+                pass
+
+    if not token:
+        return {"error": "Not authenticated (missing jetski token)", "authenticated": False, "models": {}}
+
+    import urllib.request
+    models_url = "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
+    tier_url = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+
+    result = {
+        "authenticated": True,
+        "timestamp": now,
+        "tier": {},
+        "models": {},
+        "summary": {}
+    }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "antigravity/2.12.0"
+    }
+
+    try:
+        req = urllib.request.Request(models_url, data=b"{}", headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+            all_models = data.get("models", {})
+            for m_id, m_info in all_models.items():
+                quota = m_info.get("quotaInfo")
+                display_name = m_info.get("displayName") or m_id
+                max_tokens = m_info.get("maxTokens")
+                remaining_frac = quota.get("remainingFraction", 1.0) if quota else 1.0
+                reset_time = quota.get("resetTime") if quota else None
+                
+                result["models"][m_id] = {
+                    "id": m_id,
+                    "name": display_name,
+                    "remaining_pct": round(remaining_frac * 100, 1),
+                    "remaining_fraction": remaining_frac,
+                    "reset_time": reset_time,
+                    "max_tokens": max_tokens,
+                    "recommended": bool(m_info.get("recommended", False))
+                }
+
+            def find_best_quota(prefixes):
+                matches = [v for k, v in result["models"].items() if any(k.startswith(p) or p in k for p in prefixes)]
+                if not matches:
+                    return None
+                rec = [m for m in matches if m.get("recommended")]
+                return rec[0] if rec else matches[0]
+
+            result["summary"] = {
+                "gemini_flash": find_best_quota(["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3-flash"]),
+                "gemini_pro": find_best_quota(["gemini-3.1-pro", "gemini-pro-agent", "gemini-2.5-pro"]),
+                "claude": find_best_quota(["claude-opus", "claude-sonnet"]),
+                "gpt_oss": find_best_quota(["gpt-oss"])
+            }
+    except Exception as e:
+        result["error"] = f"Failed to fetch models: {str(e)}"
+
+    try:
+        req_tier = urllib.request.Request(tier_url, data=b"{}", headers=headers)
+        with urllib.request.urlopen(req_tier, timeout=8) as resp:
+            tier_data = json.loads(resp.read().decode())
+            cur_tier = tier_data.get("currentTier", {})
+            result["tier"] = {
+                "id": cur_tier.get("id", "free-tier"),
+                "name": cur_tier.get("name", "Antigravity"),
+                "description": cur_tier.get("description", ""),
+                "subscription_type": tier_data.get("upgradeSubscriptionType", ""),
+                "project_id": tier_data.get("cloudaicompanionProject", "")
+            }
+    except Exception as e:
+        result["tier_error"] = str(e)
+
+    QUOTA_CACHE["timestamp"] = now
+    QUOTA_CACHE["data"] = result
+    return result
+
+@app.route("/quota", methods=["GET"])
+def get_quota():
+    force = request.args.get("force_refresh", "false").lower() in ["true", "1", "yes"]
+    q = fetch_model_quota(force_refresh=force)
+    return jsonify(q)
+
 @app.route("/status", methods=["GET"])
 def status():
+    cached_summary = QUOTA_CACHE["data"].get("summary") if QUOTA_CACHE.get("data") else None
     return jsonify({
         "agent_id": os.uname().nodename,
         "engine_type": get_engine_type(),
         "authenticated": get_auth_status(),
         "status": "busy" if (CURRENT_TASK and CURRENT_TASK.get("running")) else "idle",
-        "current_task": CURRENT_TASK
+        "current_task": CURRENT_TASK,
+        "quota_summary": cached_summary
     })
 
 @app.route("/auth", methods=["POST"])
@@ -271,6 +386,8 @@ def update_auth():
             with open(token_file, "w") as f:
                 json.dump(token_obj, f, indent=2)
             os.chmod(token_file, 0o600)
+        QUOTA_CACHE["timestamp"] = 0
+        QUOTA_CACHE["data"] = None
         LOG_HISTORY.append({"type": "info", "time": time.strftime("%H:%M:%S"), "text": "OAuth credentials updated successfully."})
         return jsonify({"success": True, "message": "Auth token saved and applied successfully!"})
     except Exception as e:
