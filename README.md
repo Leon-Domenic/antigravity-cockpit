@@ -1,8 +1,8 @@
-# Antigravity Cockpit
+# Webigo AI Workspaces
 
-A self-hosted multi-agent orchestration system for running and controlling [Antigravity AI](https://antigravity.dev), **Codex Engine**, **Nous Hermes**, **Open Claw**, and **Paperclip CEO** instances on **Proxmox VE (LXC Containers & KVM Virtual Machines)**.
+A self-hosted multi-agent cloud operating system and workspace orchestration engine for controlling [Antigravity AI](https://antigravity.dev), **Codex Engine**, **Nous Hermes**, **Open Claw**, and **Paperclip CEO** instances on **Proxmox VE (LXC Containers & KVM Virtual Machines)** with native **Puter.js v2 WebOS & Cloud** capabilities.
 
-Includes a web dashboard, per-agent API bridges, automated Proxmox provisioners, dedicated engine installers, and a CDP-based prompt injection engine that interacts directly with running agent sessions.
+Includes a full Puter-style multi-window desktop WebOS, 1-click live `.puter.site` web hosting, bi-directional Puter Cloud drive sync (`puter.fs`), multi-model Puter AI prompt copilot (Claude 3.5 Sonnet, GPT-4o, Gemini 1.5 Flash, DeepSeek V3/R1), per-agent API bridges, automated Proxmox provisioners, dedicated engine installers, and real-time CDP-based prompt injection directly into active agent workspaces.
 
 ---
 
@@ -257,6 +257,8 @@ Cockpit Workspaces Store (/usr/local/share/cockpit/workspaces/<ws-id>/)
 | `/api/workspaces/<id>/download` | `GET` | Stream a `.zip` download to the browser |
 | `/api/workspaces/<id>/rename` | `POST` | Rename/re-describe a workspace |
 | `/api/workspaces/<id>` | `DELETE` | Remove workspace and all files |
+| `/api/workspaces/<id>/bundle` | `GET` | Export workspace files bundle JSON for Puter hosting & Puter drive sync |
+| `/api/workspaces/import_bundle` | `POST` | Import project files bundle from Puter Cloud into local workspace storage |
 
 ### Agent Bridge workspace endpoints
 
@@ -287,6 +289,33 @@ The Cockpit auto-detects the primary language/framework by inspecting:
 1. **IDE Binding**: When a workspace is deployed, the agent bridge automatically executes `/usr/local/bin/antigravity -r /home/ubuntu/workspace` on `DISPLAY=:1` under user `ubuntu`, mounting the folder in Antigravity's active window and file tree.
 2. **Customization Rules**: Generates `/home/ubuntu/workspace/.agents/rules/cockpit_workspace.md` (conforming to the Antigravity Customization System), instructing the AI agent that all file edits, terminal commands, and tool calls are strictly confined to `/home/ubuntu/workspace`.
 3. **Execution Grounding**: Dispatched tasks include explicit workspace boundaries in their system directives.
+
+---
+
+## Puter WebOS & Cloud Engine
+
+Webigo AI Workspaces natively integrates the **Puter.js v2 SDK** (`https://js.puter.com/v2/`), turning the orchestration platform into a true browser-native WebOS desktop:
+
+### 1. WebOS Multi-Window Desktop Mode
+- **Window Management**: Draggable, resizable, floating desktop windows (`.webos-window`) with minimize, maximize/restore, and close controls.
+- **Stacking & Focus**: Dynamic z-index manager that raises windows to top on click or taskbar switch.
+- **Desktop Icons**: Fast-launch icons for all 5 agent nodes (`agy-agent-1`, `agy-agent-2`, `agy-codex`, `agy-hermes`, `agy-openclaw`), Workspaces Hub, Puter AI Copilot, Puter Cloud, Fleet Broadcast, Skills Hub, CEO Suite, and Overview Monitor.
+- **Taskbar & Start Menu**: Bottom taskbar with active window tab pills, "Webigo" Start menu popup, live system clock, and Puter user account / quota tray indicator.
+
+### 2. 1-Click Live Web Hosting (`puter.hosting.create`)
+- Instantly deploy any static or frontend workspace (e.g. React/Vite builds, HTML/JS/CSS apps) to a public live URL at `https://<subdomain>.puter.site`.
+- Automatic SSL provisioning, global CDN delivery, and zero server maintenance required.
+
+### 3. Puter Cloud Drive Sync (`puter.fs`)
+- Bi-directional sync between local Proxmox workspace storage and Puter Cloud Drive (`/webigo-workspaces/`).
+- Safely backup projects or restore bundles into any agent container with one click.
+
+### 4. Multi-Model Puter AI Prompt Copilot (`puter.ai.chat`)
+- Built-in prompt engineering copilot supporting **Claude 3.5 Sonnet**, **GPT-4o**, **Gemini 1.5 Flash**, and **DeepSeek V3 / R1**.
+- Quick engineering presets: *Refine Prompt*, *CEO Work Order*, *Troubleshooting*, and *Unit Tests*.
+- 1-click prompt insertion into the Dedicated Agent Task Dispatcher and Global Fleet Broadcast toolbars.
+
+---
 
 ### User Authentication & NextAuth / ConvexDB Fullstack Setup
 
