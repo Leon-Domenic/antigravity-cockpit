@@ -4707,9 +4707,8 @@ HTML_TEMPLATE = """
                 if (!agent) return;
                 const eng = getAgentEngine(agent.type);
                 title = `${agent.name} (${agent.role})`;
-                icon = eng.icon;
-                const vncUrl = `http://${agent.ip}:${agent.vncPort || 6080}/vnc.html?autoconnect=true&resize=scale`;
-                contentHtml = `<iframe src="${vncUrl}" class="w-full h-full border-0 bg-black"></iframe>`;
+                const vncUrl = getAgentVncUrl(agent);
+                contentHtml = `<iframe src="${vncUrl}" class="w-full h-full border-0 bg-black" allow="clipboard-read; clipboard-write; fullscreen"></iframe>`;
             } else if (appId === "app-workspaces") {
                 openWorkspacesModal();
                 return;
@@ -5141,6 +5140,16 @@ HTML_TEMPLATE = """
                 : `<span class="text-[9px] font-mono px-1.5 py-0.5 rounded font-semibold border flex items-center gap-1 text-slate-300 bg-slate-800 border-slate-700"><i class="fa-solid fa-cube text-[8px]"></i> CT ${agent.vmid}</span>`;
         }
 
+        function getAgentVncUrl(agent) {
+            if (!agent) return "";
+            const aid = agent.id || (agent.vmid ? `agent-${agent.vmid - 150}` : "agent-1");
+            const isHttps = window.location.protocol === "https:" || window.location.hostname.includes("webigo.ai");
+            if (isHttps) {
+                return `https://vnc.webigo.ai/${aid}/vnc.html?autoconnect=true&resize=scale&path=${aid}/websockify`;
+            }
+            return `http://${agent.ip}:${agent.vnc_port || agent.vncPort || 6080}/vnc.html?autoconnect=true&resize=scale&reconnect=true`;
+        }
+
         // 1. Build Sidebar DOM Once
         function buildSidebarDom() {
             const container = document.getElementById("agent-sidebar-list");
@@ -5213,7 +5222,7 @@ HTML_TEMPLATE = """
                 iframe.id = `dedicated-frame-${agent.id}`;
                 iframe.className = "w-full h-full border-0 hidden";
                 iframe.allow = "clipboard-read; clipboard-write; fullscreen";
-                iframe.src = `http://${agent.ip}:${agent.vnc_port}/vnc.html?autoconnect=true&resize=scale&reconnect=true`;
+                iframe.src = getAgentVncUrl(agent);
                 container.appendChild(iframe);
             });
         }
@@ -5225,6 +5234,7 @@ HTML_TEMPLATE = """
 
             agents.forEach(agent => {
                 const eng = getAgentEngine(agent.type);
+                const vncUrl = getAgentVncUrl(agent);
                 const box = document.createElement("div");
                 box.id = `overview-screen-${agent.id}`;
                 box.className = "glass rounded-2xl overflow-hidden shadow-2xl flex flex-col hidden";
@@ -5243,13 +5253,13 @@ HTML_TEMPLATE = """
                             <button onclick="selectView('${agent.id}')" class="px-2.5 py-1 rounded-lg text-[11px] font-medium transition flex items-center gap-1 border" style="background: var(--badge-bg); color: var(--badge-text); border-color: var(--border-base);">
                                 <i class="fa-solid fa-expand"></i> Open Page
                             </button>
-                            <a href="http://${agent.ip}:${agent.vnc_port}/vnc.html?autoconnect=true&resize=scale" target="_blank" class="text-slate-400 hover:text-white p-1 text-xs" title="Pop out">
+                            <a href="${vncUrl}" target="_blank" class="text-slate-400 hover:text-white p-1 text-xs" title="Pop out">
                                 <i class="fa-solid fa-arrow-up-right-from-square"></i>
                             </a>
                         </div>
                     </div>
                     <div class="w-full aspect-16-9 bg-black overflow-hidden">
-                        <iframe src="http://${agent.ip}:${agent.vnc_port}/vnc.html?autoconnect=true&resize=scale&reconnect=true" class="w-full h-full border-0" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+                        <iframe src="${vncUrl}" class="w-full h-full border-0" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
                     </div>
                 `;
                 container.appendChild(box);

@@ -100,8 +100,19 @@ export default function FleetPage() {
 function FleetView({ rawAgents }: { rawAgents: any[] | undefined | null }) {
   const { t } = useLanguage();
   const [selectedVncAgent, setSelectedVncAgent] = useState<any | null>(null);
+  const [useDirectLan, setUseDirectLan] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  const getVncUrl = (ag: any, direct = false) => {
+    if (!ag) return "";
+    const aid = ag.agentId || ag.id || (ag.vmid ? `agent-${ag.vmid - 150}` : "agent-1");
+    if (direct) {
+      return `http://${ag.ip || "192.168.178.169"}:${ag.vncPort || 6080}/vnc.html?autoconnect=true&resize=scale`;
+    }
+    // Proxmox cluster ingress gateway with Cloudflare SSL & WSS
+    return `https://vnc.webigo.ai/${aid}/vnc.html?autoconnect=true&resize=scale&path=${aid}/websockify`;
+  };
 
   // Fallback if Convex is initializing
   const agents = (rawAgents && rawAgents.length > 0) ? rawAgents : DEFAULT_AGENTS;
@@ -258,49 +269,65 @@ function FleetView({ rawAgents }: { rawAgents: any[] | undefined | null }) {
       </div>
 
       {/* VNC Viewer Modal */}
-      {selectedVncAgent && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="w-full max-w-5xl h-[80vh] glass-panel rounded-2xl border border-slate-700 flex flex-col overflow-hidden shadow-2xl">
-            <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/90">
-              <div className="flex items-center gap-2">
-                <MonitorPlay className="w-4 h-4 text-blue-400" />
-                <span className="font-semibold text-white text-sm">
-                  {selectedVncAgent.name} (VMID {selectedVncAgent.vmid}) - Live noVNC Desktop
-                </span>
-                <span className="text-xs font-mono text-slate-400 ml-2">
-                  http://{selectedVncAgent.ip}:{selectedVncAgent.vncPort || 6080}/vnc.html
-                </span>
+      {selectedVncAgent && (() => {
+        const vncUrl = getVncUrl(selectedVncAgent, useDirectLan);
+        const aid = selectedVncAgent.agentId || selectedVncAgent.id || (selectedVncAgent.vmid ? `agent-${selectedVncAgent.vmid - 150}` : "agent-1");
+        return (
+          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="w-full max-w-5xl h-[85vh] glass-panel rounded-2xl border border-slate-700 flex flex-col overflow-hidden shadow-2xl">
+              <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between bg-slate-900/90 flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <MonitorPlay className="w-4 h-4 text-blue-400" />
+                  <span className="font-semibold text-white text-sm">
+                    {selectedVncAgent.name} (VMID {selectedVncAgent.vmid}) - Live noVNC Desktop
+                  </span>
+                  <span className="text-xs font-mono text-emerald-400 bg-emerald-950/40 border border-emerald-800/60 px-2 py-0.5 rounded-md flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span>{useDirectLan ? "Direct LAN IP" : "Proxmox Gateway (vnc.webigo.ai)"}</span>
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setUseDirectLan(!useDirectLan)}
+                    className="px-2.5 py-1 rounded-lg text-xs font-mono text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 transition"
+                    title="Toggle between Cloudflare SSL Ingress Gateway and Direct LAN IP"
+                  >
+                    {useDirectLan ? "Switch to SSL Gateway" : "Switch to Direct LAN"}
+                  </button>
+
+                  <a
+                    href={vncUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 text-xs flex items-center gap-1 transition"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Open Tab</span>
+                  </a>
+                  <button
+                    onClick={() => setSelectedVncAgent(null)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                <a
-                  href={`http://${selectedVncAgent.ip}:${selectedVncAgent.vncPort || 6080}/vnc.html?autoconnect=true&resize=scale`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 text-xs flex items-center gap-1"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>Open Tab</span>
-                </a>
-                <button
-                  onClick={() => setSelectedVncAgent(null)}
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+              <div className="flex-1 bg-black relative">
+                <iframe
+                  key={vncUrl}
+                  src={vncUrl}
+                  className="w-full h-full border-none"
+                  allow="clipboard-read; clipboard-write; fullscreen"
+                  title={`VNC ${selectedVncAgent.name}`}
+                />
               </div>
-            </div>
-
-            <div className="flex-1 bg-black relative">
-              <iframe
-                src={`http://${selectedVncAgent.ip}:${selectedVncAgent.vncPort || 6080}/vnc.html?autoconnect=true&resize=scale`}
-                className="w-full h-full border-none"
-                title={`VNC ${selectedVncAgent.name}`}
-              />
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }
