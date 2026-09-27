@@ -1325,6 +1325,290 @@ def workspace_git_status():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ------------------------------------------------------------------
+# PAPERCLIP AGENT-TO-AGENT & CEO COMMUNICATION BUS
+# ------------------------------------------------------------------
+INBOX_FILE = "/etc/antigravity/inbox.json"
+INBOX_MESSAGES = []
+
+def get_cockpit_host():
+    if os.environ.get("COCKPIT_HOST"):
+        return os.environ.get("COCKPIT_HOST")
+    host_file = "/etc/antigravity/cockpit_host"
+    if os.path.exists(host_file):
+        try:
+            with open(host_file, "r") as f:
+                h = f.read().strip()
+                if h:
+                    return h
+        except Exception:
+            pass
+    return "192.168.178.168:3000"
+
+def get_local_agent_id():
+    if os.environ.get("AGENT_ID"):
+        return os.environ.get("AGENT_ID")
+    id_file = "/etc/antigravity/agent_id"
+    if os.path.exists(id_file):
+        try:
+            with open(id_file, "r") as f:
+                val = f.read().strip()
+                if val:
+                    return val
+        except Exception:
+            pass
+    host = os.uname().nodename
+    if host.startswith("agy-"):
+        return host.replace("agy-", "")
+    return host
+
+def _load_inbox():
+    global INBOX_MESSAGES
+    try:
+        paths = [INBOX_FILE, "/tmp/antigravity_inbox.json"]
+        for p in paths:
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    INBOX_MESSAGES = json.load(f)
+                return
+    except Exception as e:
+        print(f"[Inbox] Failed to load inbox: {e}")
+    INBOX_MESSAGES = []
+
+def _save_inbox():
+    paths = [INBOX_FILE, "/tmp/antigravity_inbox.json"]
+    for p in paths:
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(INBOX_MESSAGES[-200:], f, indent=2)
+            break
+        except Exception:
+            continue
+
+_load_inbox()
+
+def _call_cockpit(path, method="GET", payload=None, timeout=8):
+    import urllib.request, urllib.error
+    raw_host = get_cockpit_host().strip().rstrip("/")
+    if not raw_host.startswith("http://") and not raw_host.startswith("https://"):
+        raw_host = f"http://{raw_host}"
+    url = f"{raw_host}/{path.lstrip('/')}"
+    try:
+        headers = {"Content-Type": "application/json", "X-Agent-ID": get_local_agent_id()}
+        data_bytes = json.dumps(payload).encode("utf-8") if payload is not None else None
+        req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            content = resp.read().decode("utf-8")
+            return resp.status, json.loads(content) if content else {}
+    except urllib.error.HTTPError as he:
+        body = he.read().decode("utf-8") if he.fp else ""
+        try:
+            return he.code, json.loads(body)
+        except Exception:
+            return he.code, {"error": body or str(he)}
+    except Exception as e:
+        return 500, {"error": f"Failed to connect to Cockpit at {url}: {str(e)}"}
+
+@app.route("/inbox", methods=["GET"])
+def get_inbox():
+    unread_only = request.args.get("unread_only", "").lower() in ["1", "true"]
+    mark_read = request.args.get("mark_read", "").lower() in ["1", "true"]
+    limit = int(request.args.get("limit", 50))
+
+    filtered = []
+    for m in reversed(INBOX_MESSAGES):
+        if unread_only and m.get("read", False):
+            continue
+        filtered.append(m)
+        if mark_read:
+            m["read"] = True
+        if len(filtered) >= limit:
+            break
+
+    if mark_read and filtered:
+        _save_inbox()
+
+    unread_count = sum(1 for m in INBOX_MESSAGES if not m.get("read", False))
+    return jsonify({
+        "success": True,
+        "agent_id": get_local_agent_id(),
+        "messages": filtered,
+        "count": len(filtered),
+        "unread_count": unread_count
+    })
+
+@app.route("/inbox", methods=["POST"])
+def receive_inbox_message():
+    global INBOX_MESSAGES, LOG_HISTORY
+    data = request.get_json(force=True, silent=True) or {}
+    msg_id = data.get("id") or f"msg_{int(time.time() * 1000)}"
+    sender = data.get("sender_id") or data.get("sender") or "unknown"
+    recipient = data.get("recipient_id") or data.get("recipient") or get_local_agent_id()
+    content = (data.get("content") or data.get("message") or "").strip()
+    msg_type = data.get("message_type") or data.get("type") or "direct"
+    order_id = data.get("order_id")
+    urgent = bool(data.get("urgent", False))
+    meta = data.get("metadata") or {}
+
+    if not content:
+        return jsonify({"error": "Message content is required"}), 400
+
+    msg = {
+        "id": msg_id,
+        "sender_id": sender,
+        "recipient_id": recipient,
+        "content": content,
+        "message_type": msg_type,
+        "order_id": order_id,
+        "urgent": urgent,
+        "metadata": meta,
+        "timestamp": data.get("timestamp") or time.strftime("%Y-%m-%d %H:%M:%S"),
+        "read": False
+    }
+
+    # Dedup check
+    if not any(existing.get("id") == msg_id for existing in INBOX_MESSAGES):
+        INBOX_MESSAGES.append(msg)
+        _save_inbox()
+
+    type_icon = "🚨" if urgent else "📨"
+    LOG_HISTORY.append({
+        "type": "info",
+        "time": time.strftime("%H:%M:%S"),
+        "text": f"{type_icon} Peer Message from {sender} [{msg_type}]: {content[:90]}"
+    })
+
+    # If message is urgent or marked for immediate GUI alert, inject into Antigravity
+    if urgent:
+        def _urgent_alert():
+            alert_prompt = f"🚨 URGENT MESSAGE FROM {sender.upper()}:\n{content}\n(Please address this immediately or incorporate into current workflow)"
+            try:
+                inject_into_antigravity(alert_prompt, start_new_conversation=False)
+            except Exception as e:
+                print(f"[Inbox] Failed to inject urgent alert to GUI: {e}")
+        threading.Thread(target=_urgent_alert, daemon=True).start()
+
+    return jsonify({"success": True, "received": True, "message_id": msg_id})
+
+@app.route("/inbox/<msg_id>/read", methods=["POST"])
+def mark_message_read(msg_id):
+    updated = False
+    for m in INBOX_MESSAGES:
+        if m.get("id") == msg_id:
+            m["read"] = True
+            updated = True
+            break
+    if updated:
+        _save_inbox()
+        return jsonify({"success": True, "id": msg_id, "read": True})
+    return jsonify({"error": f"Message {msg_id} not found"}), 404
+
+@app.route("/communicate", methods=["POST"])
+@app.route("/messages/send", methods=["POST"])
+def communicate():
+    """Outgoing message: sends inter-agent or agent-to-CEO message via Cockpit bus."""
+    data = request.get_json(force=True, silent=True) or {}
+    recipient = data.get("recipient") or data.get("recipient_id") or "ceo"
+    content = (data.get("content") or data.get("message") or "").strip()
+    msg_type = data.get("type") or data.get("message_type") or "direct"
+    order_id = data.get("order_id")
+    urgent = bool(data.get("urgent", False))
+    metadata = data.get("metadata") or {}
+    sender = data.get("sender") or data.get("sender_id") or get_local_agent_id()
+
+    if not content:
+        return jsonify({"error": "Content is required"}), 400
+
+    payload = {
+        "sender": sender,
+        "recipient": recipient,
+        "content": content,
+        "type": msg_type,
+        "order_id": order_id,
+        "urgent": urgent,
+        "metadata": metadata
+    }
+
+    code, resp = _call_cockpit("/api/ceo/messages", method="POST", payload=payload)
+    if code in [200, 201]:
+        LOG_HISTORY.append({
+            "type": "info",
+            "time": time.strftime("%H:%M:%S"),
+            "text": f"📤 Dispatched message to {recipient} [{msg_type}]: {content[:80]}"
+        })
+    return jsonify(resp), code
+
+@app.route("/task/report", methods=["POST"])
+def task_report():
+    """Reports progress on active work order back to CEO Orchestrator."""
+    data = request.get_json(force=True, silent=True) or {}
+    order_id = data.get("order_id")
+    if not order_id:
+        return jsonify({"error": "order_id is required"}), 400
+
+    payload = {
+        "agent_id": data.get("agent_id") or get_local_agent_id(),
+        "status": data.get("status") or "in_progress",
+        "note": data.get("note") or "",
+        "files_modified": data.get("files_modified") or [],
+        "acceptance_checks": data.get("acceptance_checks") or []
+    }
+
+    code, resp = _call_cockpit(f"/api/ceo/tasks/{order_id}/report", method="POST", payload=payload)
+    if code in [200, 201]:
+        LOG_HISTORY.append({
+            "type": "info",
+            "time": time.strftime("%H:%M:%S"),
+            "text": f"📋 Work order {order_id} status reported: {payload['status']} - {payload['note'][:60]}"
+        })
+    return jsonify(resp), code
+
+@app.route("/task/subtask", methods=["POST"])
+def task_subtask():
+    """Delegates a subtask to another role across the fleet."""
+    data = request.get_json(force=True, silent=True) or {}
+    order_id = data.get("order_id") or data.get("parent_order_id")
+    if not order_id:
+        return jsonify({"error": "parent order_id is required"}), 400
+
+    payload = {
+        "from_agent": data.get("from_agent") or get_local_agent_id(),
+        "to_role": data.get("to_role") or "qa",
+        "title": data.get("title") or "Subtask",
+        "instructions": data.get("instructions") or "",
+        "acceptance_criteria": data.get("acceptance_criteria") or [],
+        "workspace_id": data.get("workspace_id")
+    }
+
+    code, resp = _call_cockpit(f"/api/ceo/tasks/{order_id}/subtask", method="POST", payload=payload)
+    if code in [200, 201]:
+        LOG_HISTORY.append({
+            "type": "info",
+            "time": time.strftime("%H:%M:%S"),
+            "text": f"🔀 Subtask delegated to role '{payload['to_role']}': {payload['title'][:60]}"
+        })
+    return jsonify(resp), code
+
+@app.route("/fleet", methods=["GET"])
+def fleet_discovery():
+    """Returns the cluster fleet directory, agents, roles, and status from Cockpit."""
+    code, resp = _call_cockpit("/api/ceo/fleet", method="GET")
+    if code == 200 and isinstance(resp, dict):
+        resp["local_agent_id"] = get_local_agent_id()
+    return jsonify(resp), code
+
+@app.route("/tasks", methods=["GET"])
+def agent_tasks():
+    """Returns active work orders assigned to this agent."""
+    my_id = get_local_agent_id()
+    status_filter = request.args.get("status")
+    path = f"/api/ceo/tasks?agent_id={my_id}"
+    if status_filter:
+        path += f"&status={status_filter}"
+    code, resp = _call_cockpit(path, method="GET")
+    return jsonify(resp), code
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
 

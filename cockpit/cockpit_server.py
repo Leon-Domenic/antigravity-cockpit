@@ -92,6 +92,8 @@ def get_library_skills(force_refresh=False):
                         cat = "Convex Backend"
                     elif d_lower.startswith("clerk"):
                         cat = "Clerk Auth"
+                    elif any(k in d_lower for k in ["paperclip", "fleet", "ceo", "agent-to-agent", "orchestrat"]):
+                        cat = "Multi-Agent Coordination"
                     elif any(k in d_lower for k in ["bigquery", "dataform", "dbt", "gcp", "spark", "composer", "ml", "notebook", "discovering-gcp", "building-data", "data-autocleaning", "developing-with"]):
                         cat = "Cloud & Data Pipelines"
                     elif any(k in d_lower for k in ["test", "debugging", "chrome", "repair", "accidental", "gcloud-auth", "vitest", "playwright", "tailwind", "git"]):
@@ -10644,5 +10646,180 @@ def ceo_get_prompt(prompt_name):
             
     return jsonify({"error": f"Prompt file {prompt_name} not found"}), 404
 
+# =========================================================================
+# NATIVE AGENT COMMUNICATION & PAPERCLIP BUS
+# =========================================================================
+
+def _allow_agent_or_user():
+    """Returns True if request is from an authenticated user or internal cluster agent."""
+    if get_current_user():
+        return True
+    ip = request.remote_addr or ""
+    if ip in ["127.0.0.1", "::1", "localhost"] or ip.startswith("192.168.178.") or ip.startswith("10.") or ip.startswith("172."):
+        return True
+    return False
+
+@app.route("/api/ceo/fleet", methods=["GET"])
+def ceo_get_fleet():
+    if not _allow_agent_or_user():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    enriched = []
+    for a in AGENTS:
+        st = get_single_agent_status(a["id"])
+        # Find active task
+        active_task = None
+        if ceo_orchestrator:
+            for wo in ceo_orchestrator.work_orders.values():
+                if wo.assigned_agent_id == a["id"] and wo.status in ["in_progress", "in_review", "blocked"]:
+                    active_task = {"id": wo.id, "title": wo.title, "status": wo.status, "role": wo.role}
+                    break
+
+        enriched.append({
+            "id": a["id"],
+            "name": a.get("name"),
+            "role": a.get("role", "Specialist"),
+            "type": a.get("type", "antigravity"),
+            "ip": a.get("ip"),
+            "port": a.get("port", 8000),
+            "vnc_port": a.get("vnc_port", 6080),
+            "status": st.get("status", "offline"),
+            "busy": st.get("busy", False),
+            "active_task": active_task
+        })
+    return jsonify({"success": True, "agents": enriched, "roles": ROLE_DEFINITIONS if ROLE_DEFINITIONS else []})
+
+@app.route("/api/ceo/messages", methods=["GET", "POST"])
+def ceo_messages_endpoint():
+    if not _allow_agent_or_user():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if not ceo_orchestrator:
+        return jsonify({"error": "CEO Orchestrator engine not initialized"}), 503
+
+    if request.method == "POST":
+        data = request.get_json(force=True, silent=True) or {}
+        sender = data.get("sender") or data.get("sender_id") or "anonymous"
+        recipient = data.get("recipient") or data.get("recipient_id") or "ceo"
+        content = (data.get("content") or data.get("message") or "").strip()
+        msg_type = data.get("type") or "direct"
+        order_id = data.get("order_id")
+        urgent = bool(data.get("urgent", False))
+        metadata = data.get("metadata") or {}
+
+        if not content:
+            return jsonify({"error": "Message content is required"}), 400
+
+        msg = ceo_orchestrator.send_message(
+            sender_id=sender,
+            recipient_id=recipient,
+            content=content,
+            message_type=msg_type,
+            order_id=order_id,
+            urgent=urgent,
+            metadata=metadata
+        )
+
+        # Forward in real-time to recipient agent's bridge(s)
+        forwarded = False
+        if recipient in ["all", "broadcast"]:
+            for a in AGENTS:
+                if a.get("ip") and a.get("id") != sender:
+                    try:
+                        requests.post(f"http://{a['ip']}:{a.get('port', 8000)}/inbox", json=msg, timeout=2.0)
+                        forwarded = True
+                    except Exception:
+                        pass
+        else:
+            # Match by agent id or by agent role
+            targets = [a for a in AGENTS if a.get("id") == recipient or a.get("role") == recipient]
+            for target_agent in targets:
+                if target_agent.get("ip"):
+                    try:
+                        b_url = f"http://{target_agent['ip']}:{target_agent.get('port', 8000)}/inbox"
+                        requests.post(b_url, json=msg, timeout=2.5)
+                        forwarded = True
+                    except Exception as fe:
+                        print(f"[MessageBus] Direct forward to {recipient} at {target_agent.get('ip')} failed: {fe}")
+
+        return jsonify({"success": True, "message": msg, "forwarded_live": forwarded})
+
+    else:
+        agent_id = request.args.get("agent_id") or request.args.get("recipient") or "ceo"
+        unread_only = request.args.get("unread_only", "").lower() in ["1", "true"]
+        mark_read = request.args.get("mark_read", "").lower() in ["1", "true"]
+        limit = int(request.args.get("limit", 50))
+
+        messages = ceo_orchestrator.get_messages(agent_id=agent_id, unread_only=unread_only, mark_read=mark_read, limit=limit)
+        return jsonify({"success": True, "messages": messages, "count": len(messages)})
+
+@app.route("/api/ceo/tasks/<order_id>/report", methods=["POST"])
+def ceo_task_report(order_id):
+    if not _allow_agent_or_user():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if not ceo_orchestrator:
+        return jsonify({"error": "CEO Orchestrator engine not initialized"}), 503
+
+    data = request.get_json(force=True, silent=True) or {}
+    agent_id = data.get("agent_id") or "agent-1"
+    status = data.get("status") or "in_progress"
+    note = data.get("note") or ""
+    files = data.get("files_modified") or []
+    checks = data.get("acceptance_checks") or []
+
+    success, result = ceo_orchestrator.report_progress(
+        order_id=order_id,
+        agent_id=agent_id,
+        status=status,
+        note=note,
+        files_modified=files,
+        acceptance_checks=checks
+    )
+
+    if not success:
+        return jsonify({"success": False, "error": str(result)}), 400
+
+    # If completed, pulse supervisor immediately to dispatch downstream tasks
+    if status == "done" and ceo_supervisor:
+        try:
+            ceo_supervisor.pulse()
+        except Exception:
+            pass
+
+    return jsonify({"success": True, "data": result})
+
+@app.route("/api/ceo/tasks/<order_id>/subtask", methods=["POST"])
+def ceo_task_subtask(order_id):
+    if not _allow_agent_or_user():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if not ceo_orchestrator:
+        return jsonify({"error": "CEO Orchestrator engine not initialized"}), 503
+
+    data = request.get_json(force=True, silent=True) or {}
+    from_agent = data.get("from_agent") or "agent-1"
+    to_role = data.get("to_role") or "qa"
+    title = data.get("title") or "Delegated Subtask"
+    instructions = data.get("instructions") or ""
+    criteria = data.get("acceptance_criteria") or []
+    ws_id = data.get("workspace_id")
+
+    success, result = ceo_orchestrator.delegate_subtask(
+        parent_order_id=order_id,
+        from_agent_id=from_agent,
+        to_role=to_role,
+        title=title,
+        instructions=instructions,
+        acceptance_criteria=criteria,
+        workspace_id=ws_id
+    )
+
+    if not success:
+        return jsonify({"success": False, "error": str(result)}), 400
+
+    return jsonify({"success": True, "data": result})
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=3000)
+

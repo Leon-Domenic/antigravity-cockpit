@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+"""
+Paperclip Fleet CLI - Native Inter-Agent and CEO Communication Tool
+Allows Antigravity agents to discover peers, send messages, check inboxes,
+report work order status, and delegate subtasks across the Webigo Workspaces cluster.
+"""
+
+import os
+import sys
+import json
+import argparse
+import urllib.request
+import urllib.error
+
+BRIDGE_URL = os.environ.get("AGENT_BRIDGE_URL", "http://127.0.0.1:8000")
+
+def _request(path, method="GET", payload=None, timeout=6):
+    url = f"{BRIDGE_URL.rstrip('/')}/{path.lstrip('/')}"
+    try:
+        data_bytes = json.dumps(payload).encode("utf-8") if payload is not None else None
+        headers = {"Content-Type": "application/json"} if payload is not None else {}
+        req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            content = resp.read().decode("utf-8")
+            return resp.status, json.loads(content) if content else {}
+    except urllib.error.HTTPError as he:
+        body = he.read().decode("utf-8") if he.fp else ""
+        try:
+            return he.code, json.loads(body)
+        except Exception:
+            return he.code, {"error": body or str(he)}
+    except Exception as e:
+        return 500, {"error": f"Failed to connect to agent bridge at {url}: {e}"}
+
+def cmd_whoami(args):
+    code, data = _request("/status")
+    code2, fleet = _request("/fleet")
+    
+    agent_id = data.get("agent_id", os.uname().nodename)
+    engine = data.get("engine_type", "antigravity")
+    
+    role = "Specialist"
+    ip = "127.0.0.1"
+    if isinstance(fleet, dict) and "agents" in fleet:
+        for a in fleet["agents"]:
+            if a.get("id") == agent_id:
+                role = a.get("role", role)
+                ip = a.get("ip", ip)
+                break
+                
+    print(f"Agent ID:   {agent_id}")
+    print(f"Role:       {role}")
+    print(f"Engine:     {engine}")
+    print(f"Internal IP:{ip}")
+    print(f"Status:     {data.get('status', 'online')}")
+    print(f"Bridge URL: {BRIDGE_URL}")
+
+def cmd_fleet(args):
+    code, data = _request("/fleet")
+    if code != 200 or not isinstance(data, dict):
+        print(f"Error fetching fleet: {data.get('error', 'unknown error')}", file=sys.stderr)
+        sys.exit(1)
+        
+    agents = data.get("agents", [])
+    local_id = data.get("local_agent_id", "")
+    
+    print("=" * 78)
+    print(f"{'ID':<12} {'NAME':<18} {'ROLE':<24} {'IP':<16} {'STATUS':<8}")
+    print("=" * 78)
+    for a in agents:
+        aid = a.get("id", "")
+        marker = " (you)" if aid == local_id else ""
+        name = (a.get("name", "") + marker)[:17]
+        role = a.get("role", "Specialist")[:23]
+        ip = a.get("ip", "")
+        status = "BUSY" if a.get("busy") else "IDLE" if a.get("online") else "OFFLINE"
+        print(f"{aid:<12} {name:<18} {role:<24} {ip:<16} {status:<8}")
+    print("=" * 78)
+
+def cmd_inbox(args):
+    params = []
+    if args.unread:
+        params.append("unread_only=true")
+    if args.mark_read:
+        params.append("mark_read=true")
+    if args.limit:
+        params.append(f"limit={args.limit}")
+    query = "?" + "&".join(params) if params else ""
+    
+    code, data = _request(f"/inbox{query}")
+    if code != 200 or not isinstance(data, dict):
+        print(f"Error reading inbox: {data.get('error', 'unknown error')}", file=sys.stderr)
+        sys.exit(1)
+        
+    messages = data.get("messages", [])
+    unread = data.get("unread_count", 0)
+    print(f"--- INBOX: {len(messages)} message(s) ({unread} unread) ---")
+    if not messages:
+        print("No messages found.")
+        return
+        
+    for m in messages:
+        msg_id = m.get("id", "")
+        sender = m.get("sender_id", "unknown")
+        m_type = m.get("message_type", "direct")
+        urgent = " [URGENT]" if m.get("urgent") else ""
+        read_flag = " " if m.get("read") else "*"
+        time_str = m.get("timestamp", "")
+        print(f"[{read_flag}] ID: {msg_id} | From: {sender} | Type: {m_type}{urgent} | Time: {time_str}")
+        print(f"    {m.get('content', '').strip()}")
+        if m.get("order_id"):
+            print(f"    (Related Work Order: {m.get('order_id')})")
+        print("-" * 60)
+
+def cmd_send(args):
+    payload = {
+        "recipient": args.recipient,
+        "content": args.message,
+        "type": args.type,
+        "order_id": args.order_id,
+        "urgent": args.urgent
+    }
+    code, data = _request("/communicate", method="POST", payload=payload)
+    if code not in [200, 201]:
+        print(f"Error sending message: {data.get('error', 'unknown error')}", file=sys.stderr)
+        sys.exit(1)
+        
+    forwarded = data.get("forwarded_live", False)
+    fw_str = " (live delivered to peer bridge)" if forwarded else " (queued on CEO bus)"
+    print(f"Message sent to '{args.recipient}' successfully{fw_str}!")
+
+def cmd_tasks(args):
+    path = f"/tasks" + (f"?status={args.status}" if args.status else "")
+    code, data = _request(path)
+    if code != 200 or not isinstance(data, dict):
+        print(f"Error fetching tasks: {data.get('error', 'unknown error')}", file=sys.stderr)
+        sys.exit(1)
+        
+    tasks = data.get("tasks", [])
+    print(f"--- ASSIGNED WORK ORDERS ({len(tasks)}) ---")
+    if not tasks:
+        print("No assigned work orders found.")
+        return
+        
+    for t in tasks:
+        tid = t.get("id", "")
+        status = t.get("status", "").upper()
+        title = t.get("title", "")
+        role = t.get("role", "")
+        print(f"[{status}] {tid} ({role}): {title}")
+        if t.get("instructions"):
+            print(f"    Instructions: {t.get('instructions')}")
+        if t.get("acceptance_criteria"):
+            print("    Acceptance Criteria:")
+            for ac in t.get("acceptance_criteria"):
+                print(f"      - {ac}")
+        print("-" * 60)
+
+def cmd_report_task(args):
+    files = [f.strip() for f in args.files.split(",") if f.strip()] if args.files else []
+    checks = [c.strip() for c in args.checks.split(",") if c.strip()] if args.checks else []
+    payload = {
+        "order_id": args.order_id,
+        "status": args.status,
+        "note": args.note or "",
+        "files_modified": files,
+        "acceptance_checks": checks
+    }
+    code, data = _request("/task/report", method="POST", payload=payload)
+    if code not in [200, 201] or not data.get("success"):
+        print(f"Error reporting task: {data.get('error', 'unknown error')}", file=sys.stderr)
+        sys.exit(1)
+        
+    print(f"Work order {args.order_id} reported as '{args.status}' successfully!")
+
+def cmd_delegate(args):
+    criteria = [c.strip() for c in args.criteria.split(",") if c.strip()] if args.criteria else []
+    payload = {
+        "order_id": args.order_id,
+        "to_role": args.role,
+        "title": args.title,
+        "instructions": args.instructions,
+        "acceptance_criteria": criteria,
+        "workspace_id": args.workspace
+    }
+    code, data = _request("/task/subtask", method="POST", payload=payload)
+    if code not in [200, 201] or not data.get("success"):
+        print(f"Error delegating subtask: {data.get('error', 'unknown error')}", file=sys.stderr)
+        sys.exit(1)
+        
+    subtask = data.get("data", {})
+    sub_id = subtask.get("id", "new")
+    print(f"Subtask {sub_id} delegated to role '{args.role}' successfully!")
+
+def main():
+    parser = argparse.ArgumentParser(description="Paperclip Fleet CLI - Inter-Agent & CEO Coordination")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # whoami
+    subparsers.add_parser("whoami", help="Display local agent identity, role, and bridge connection")
+
+    # fleet
+    subparsers.add_parser("fleet", help="Discover active agents, roles, IPs, and status in the cluster")
+
+    # inbox
+    inbox_parser = subparsers.add_parser("inbox", help="View messages received by this agent")
+    inbox_parser.add_argument("--unread", action="store_true", help="Only show unread messages")
+    inbox_parser.add_argument("--mark-read", action="store_true", help="Mark returned messages as read")
+    inbox_parser.add_argument("--limit", type=int, default=30, help="Maximum messages to retrieve")
+
+    # send
+    send_parser = subparsers.add_parser("send", help="Send a message to a peer agent, role, or the CEO")
+    send_parser.add_argument("recipient", help="Target agent id (e.g. agent-2), role (e.g. secops), 'ceo', or 'broadcast'")
+    send_parser.add_argument("message", help="Message body content")
+    send_parser.add_argument("--type", default="direct", choices=["direct", "status_report", "question", "handover", "escalation"], help="Message category")
+    send_parser.add_argument("--order-id", help="Associated work order ID")
+    send_parser.add_argument("--urgent", action="store_true", help="Flag as urgent (prompts immediate alert in recipient GUI)")
+
+    # msg alias
+    msg_parser = subparsers.add_parser("msg", help="Message operations (inbox / send)")
+    msg_sub = msg_parser.add_subparsers(dest="msg_command")
+    
+    msg_inbox = msg_sub.add_parser("inbox", help="View inbox")
+    msg_inbox.add_argument("--unread", action="store_true", help="Only show unread messages")
+    msg_inbox.add_argument("--mark-read", action="store_true", help="Mark returned messages as read")
+    msg_inbox.add_argument("--limit", type=int, default=30, help="Maximum messages to retrieve")
+
+    msg_send = msg_sub.add_parser("send", help="Send message")
+    msg_send.add_argument("recipient", help="Target agent id, role, ceo, or broadcast")
+    msg_send.add_argument("message", help="Message body content")
+    msg_send.add_argument("--type", default="direct", choices=["direct", "status_report", "question", "handover", "escalation"], help="Message category")
+    msg_send.add_argument("--order-id", help="Associated work order ID")
+    msg_send.add_argument("--urgent", action="store_true", help="Flag as urgent")
+
+    # tasks
+    tasks_parser = subparsers.add_parser("tasks", help="List work orders assigned to this agent")
+    tasks_parser.add_argument("--status", choices=["pending", "in_progress", "in_review", "done", "blocked"], help="Filter by status")
+
+    # task report / delegate
+    task_parser = subparsers.add_parser("task", help="Work order actions (report / delegate / list)")
+    task_sub = task_parser.add_subparsers(dest="task_command")
+    
+    t_list = task_sub.add_parser("list", help="List assigned work orders")
+    t_list.add_argument("--status", choices=["pending", "in_progress", "in_review", "done", "blocked"], help="Filter by status")
+
+    t_report = task_sub.add_parser("report", help="Report progress on a work order")
+    t_report.add_argument("--order-id", required=True, help="Work order ID (e.g. WO-1)")
+    t_report.add_argument("--status", required=True, choices=["in_progress", "done", "blocked", "in_review"], help="New status")
+    t_report.add_argument("--note", default="", help="Summary of work completed or reason for blockage")
+    t_report.add_argument("--files", help="Comma-separated list of modified files")
+    t_report.add_argument("--checks", help="Comma-separated list of completed acceptance criteria")
+
+    t_delegate = task_sub.add_parser("delegate", help="Delegate a subtask to another role")
+    t_delegate.add_argument("--order-id", required=True, help="Parent work order ID")
+    t_delegate.add_argument("--role", required=True, help="Target role (e.g. qa, backend, secops, devops)")
+    t_delegate.add_argument("--title", required=True, help="Subtask title")
+    t_delegate.add_argument("--instructions", required=True, help="Execution instructions for the specialist")
+    t_delegate.add_argument("--criteria", help="Comma-separated acceptance criteria")
+    t_delegate.add_argument("--workspace", help="Target workspace path or ID")
+
+    args = parser.parse_args()
+
+    if args.command == "whoami":
+        cmd_whoami(args)
+    elif args.command == "fleet":
+        cmd_fleet(args)
+    elif args.command == "inbox":
+        cmd_inbox(args)
+    elif args.command == "send":
+        cmd_send(args)
+    elif args.command == "msg":
+        if args.msg_command == "inbox":
+            cmd_inbox(args)
+        elif args.msg_command == "send":
+            cmd_send(args)
+        else:
+            msg_parser.print_help()
+    elif args.command == "tasks":
+        cmd_tasks(args)
+    elif args.command == "task":
+        if args.task_command == "list":
+            cmd_tasks(args)
+        elif args.task_command == "report":
+            cmd_report_task(args)
+        elif args.task_command == "delegate":
+            cmd_delegate(args)
+        else:
+            task_parser.print_help()
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()

@@ -107,6 +107,7 @@ class CeoOrchestrator:
         self.board_directives = []
         self.work_orders = {}
         self.audit_log = []
+        self.messages = []
         self.executive_summary = "CEO Orchestrator initialized. Standing by for Board Directives."
         self.load_state()
 
@@ -130,6 +131,7 @@ class CeoOrchestrator:
                 "executive_summary": self.executive_summary,
                 "board_directives": self.board_directives,
                 "work_orders": {k: v.to_dict() for k, v in self.work_orders.items()},
+                "messages": self.messages[-200:],
                 "audit_log": self.audit_log[-150:],
                 "updated_at": time.time()
             }
@@ -147,6 +149,7 @@ class CeoOrchestrator:
                     self.board_directives = data.get("board_directives", [])
                     raw_wo = data.get("work_orders", {})
                     self.work_orders = {k: WorkOrder.from_dict(v) for k, v in raw_wo.items()}
+                    self.messages = data.get("messages", [])
                     self.audit_log = data.get("audit_log", [])
             except Exception as e:
                 print(f"[CEO Orchestrator] Warning: Failed to load state: {e}")
@@ -504,5 +507,198 @@ class CeoOrchestrator:
             "blocked": blocked,
             "done": done,
             "velocity_pct": round((done / total * 100) if total > 0 else 100.0, 1),
-            "directives_count": len(self.board_directives)
+            "directives_count": len(self.board_directives),
+            "messages_count": len(self.messages)
         }
+
+    # =========================================================================
+    # INTER-AGENT MESSAGING & NATIVE FLEET COMMUNICATION
+    # =========================================================================
+
+    def send_message(self, sender_id, recipient_id, content, message_type="direct", order_id=None, urgent=False, metadata=None):
+        """
+        Transmits an inter-agent message across the fleet or between agent and CEO.
+        Message types:
+          - direct: 1-to-1 consultation or technical question
+          - status_report: agent informs CEO/peer of progress
+          - escalation: agent reports blocker needing intervention
+          - handover: upstream agent notifies downstream agent that component is ready
+          - broadcast: message to all fleet members
+        """
+        msg_id = generate_id("MSG")
+        msg = {
+            "id": msg_id,
+            "sender_id": sender_id,
+            "recipient_id": recipient_id,
+            "content": content,
+            "type": message_type,
+            "order_id": order_id,
+            "urgent": bool(urgent),
+            "metadata": metadata or {},
+            "read": False,
+            "timestamp": time.time(),
+            "time_iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        }
+        self.messages.append(msg)
+        if len(self.messages) > 300:
+            self.messages = self.messages[-300:]
+
+        self.log_event("agent_message", f"Message [{msg_id}] {sender_id} -> {recipient_id}: {content[:60]}", {
+            "msg_id": msg_id,
+            "sender": sender_id,
+            "recipient": recipient_id,
+            "type": message_type,
+            "order_id": order_id
+        })
+        self.save_state()
+        return msg
+
+    def get_messages(self, agent_id, unread_only=False, mark_read=False, limit=50):
+        """Retrieves messages for an agent (including broadcast messages)."""
+        matching = []
+        for m in reversed(self.messages):
+            if m["recipient_id"] in [agent_id, "all", "broadcast"] or agent_id == "ceo":
+                if unread_only and m.get("read", False):
+                    continue
+                matching.append(m)
+                if mark_read and m["recipient_id"] == agent_id:
+                    m["read"] = True
+                if len(matching) >= limit:
+                    break
+
+        if mark_read:
+            self.save_state()
+
+        return matching
+
+    def report_progress(self, order_id, agent_id, status, note=None, files_modified=None, acceptance_checks=None):
+        """
+        Allows an active agent to report progress natively from its workspace.
+        Transitions work order state, updates checklist items, records notes, and cascades dependencies.
+        """
+        wo = self.work_orders.get(order_id)
+        if not wo:
+            return False, f"Work order {order_id} not found"
+
+        old_status = wo.status
+        wo.status = status
+        wo.updated_at = time.time()
+        if status == "done":
+            wo.completed_at = time.time()
+
+        report_entry = {
+            "time": time.time(),
+            "time_iso": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "agent_id": agent_id,
+            "status": status,
+            "note": note or f"Status updated to {status}",
+            "files_modified": files_modified or [],
+            "acceptance_checks": acceptance_checks or []
+        }
+        wo.execution_notes.append(report_entry)
+
+        # Notify CEO on escalation or review gate
+        if status == "blocked":
+            self.send_message(
+                sender_id=agent_id,
+                recipient_id="ceo",
+                content=f"ESCALATION: Work order {order_id} is BLOCKED. Reason: {note}",
+                message_type="escalation",
+                order_id=order_id,
+                urgent=True
+            )
+        elif status in ["in_review", "done"]:
+            self.send_message(
+                sender_id=agent_id,
+                recipient_id="ceo",
+                content=f"COMPLETION REPORT: Work order {order_id} reached {status.upper()}. Summary: {note}",
+                message_type="status_report",
+                order_id=order_id
+            )
+
+        # Cascading dependency unlock on completion
+        unblocked_orders = []
+        if status == "done":
+            for other_id, other_wo in self.work_orders.items():
+                if other_wo.status == "blocked" and order_id in other_wo.blocked_by:
+                    all_resolved = all(
+                        self.work_orders.get(dep) and self.work_orders.get(dep).status == "done"
+                        for dep in other_wo.blocked_by
+                    )
+                    if all_resolved:
+                        other_wo.status = "todo"
+                        unblocked_orders.append(other_wo)
+                        self.log_event("dependency_unblocked", f"Task {other_id} unblocked by completion of {order_id}", {"order_id": other_id})
+                        
+                        # Handover message to the newly unblocked agent
+                        if other_wo.assigned_agent_id:
+                            self.send_message(
+                                sender_id=agent_id,
+                                recipient_id=other_wo.assigned_agent_id,
+                                content=f"HANDOVER: Upstream task {order_id} is DONE. Your task {other_id} ({other_wo.title}) is now unblocked and ready for execution.",
+                                message_type="handover",
+                                order_id=other_id,
+                                urgent=True
+                            )
+
+        self.log_event("agent_progress_reported", f"Agent {agent_id} reported {status} on {order_id}", {
+            "order_id": order_id,
+            "agent_id": agent_id,
+            "status": status,
+            "note": note
+        })
+        self.save_state()
+        return True, {
+            "order": wo.to_dict(),
+            "unblocked_orders": [o.id for o in unblocked_orders]
+        }
+
+    def delegate_subtask(self, parent_order_id, from_agent_id, to_role, title, instructions, acceptance_criteria=None, workspace_id=None):
+        """
+        Allows an agent to dynamically delegate a subtask to another fleet specialist.
+        Registers parent-child work order relationship and dispatches immediately.
+        """
+        parent = self.work_orders.get(parent_order_id)
+        ws_id = workspace_id or (parent.workspace_id if parent else None)
+        target_agent = self.get_agent_for_role(to_role)
+
+        subtask = WorkOrder(
+            task_id=generate_id("WO"),
+            title=title,
+            role=to_role,
+            goal=f"Delegated by {from_agent_id}: {title}",
+            parent_id=parent_order_id,
+            assigned_agent_id=target_agent,
+            priority="high",
+            instructions=f"DELEGATED BY: {from_agent_id} for parent task {parent_order_id}\n\n{instructions}",
+            acceptance_criteria=acceptance_criteria or ["Implement according to instructions", "Report completion back to delegating agent"],
+            blocked_by=[],
+            workspace_id=ws_id
+        )
+        self.work_orders[subtask.id] = subtask
+        self.log_event("subtask_delegated", f"Agent {from_agent_id} delegated {subtask.id} [{to_role}] -> {target_agent}", {
+            "parent_id": parent_order_id,
+            "subtask_id": subtask.id,
+            "from_agent": from_agent_id,
+            "to_agent": target_agent
+        })
+        self.save_state()
+
+        # Send formal delegation message
+        self.send_message(
+            sender_id=from_agent_id,
+            recipient_id=target_agent,
+            content=f"SUBTASK DELEGATION: New work order {subtask.id} assigned to you: {title}\nInstructions: {instructions}",
+            message_type="direct",
+            order_id=subtask.id,
+            urgent=True
+        )
+
+        # Dispatch
+        dispatched, dispatch_msg = self.dispatch_work_order(subtask.id)
+        return True, {
+            "subtask": subtask.to_dict(),
+            "dispatched": dispatched,
+            "dispatch_message": str(dispatch_msg)
+        }
+
