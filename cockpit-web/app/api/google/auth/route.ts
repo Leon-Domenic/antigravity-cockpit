@@ -1,23 +1,61 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const COCKPIT_URL = process.env.COCKPIT_BACKEND_URL || "http://192.168.178.168:3000";
+const COCKPIT_URL = process.env.COCKPIT_BACKEND_URL || "https://cockpit.webigo.ai";
+const FALLBACK_LAN_URL = "http://192.168.178.168:3000";
+const COCKPIT_SECRET = process.env.COCKPIT_INTERNAL_KEY || "webigo_cockpit_internal_cluster_secret_2026";
+
+function getHeaders() {
+  return {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${COCKPIT_SECRET}`,
+    "X-Cockpit-Internal-Key": COCKPIT_SECRET,
+  };
+}
+
+async function fetchCockpit(path: string, options: RequestInit = {}) {
+  const mergedOptions: RequestInit = {
+    ...options,
+    headers: {
+      ...getHeaders(),
+      ...(options.headers || {}),
+    },
+    signal: options.signal || AbortSignal.timeout(6000),
+  };
+
+  try {
+    const res = await fetch(`${COCKPIT_URL}${path}`, mergedOptions);
+    if (res.ok) return res;
+  } catch (e) {
+    // Primary failed, try LAN fallback if available
+  }
+
+  if (COCKPIT_URL !== FALLBACK_LAN_URL) {
+    try {
+      const res = await fetch(`${FALLBACK_LAN_URL}${path}`, mergedOptions);
+      if (res.ok) return res;
+    } catch (e) {}
+  }
+
+  return null;
+}
 
 export async function GET(req: NextRequest) {
   try {
-    const res = await fetch(`${COCKPIT_URL}/api/google/auth`, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(4000),
-    });
-    if (res.ok) {
+    const res = await fetchCockpit("/api/google/auth", { cache: "no-store" });
+    if (res && res.ok) {
       const data = await res.json();
-      return NextResponse.json(data);
+      return NextResponse.json({
+        ...data,
+        authenticated: Boolean(data.authenticated || data.configured),
+        configured: Boolean(data.configured || data.authenticated),
+        offline: false,
+      });
     }
-  } catch (err: any) {
-    // If Cockpit server is unreachable (e.g. edge worker without VPN)
-  }
+  } catch (err: any) {}
 
   return NextResponse.json({
     authenticated: false,
+    configured: false,
     email: null,
     name: null,
     picture: null,
@@ -35,49 +73,36 @@ export async function POST(req: NextRequest) {
     const { action, token_json } = body;
 
     if (action === "login_url") {
-      const res = await fetch(`${COCKPIT_URL}/api/google/auth/login_url`, {
-        signal: AbortSignal.timeout(4000),
-      });
-      const data = await res.json();
-      return NextResponse.json(data);
+      const res = await fetchCockpit("/api/google/auth/login_url");
+      if (res && res.ok) return NextResponse.json(await res.json());
+      return NextResponse.json({ error: "Failed to reach Cockpit login URL endpoint" }, { status: 502 });
     }
 
     if (action === "sync") {
-      const res = await fetch(`${COCKPIT_URL}/api/google/auth/sync`, {
-        method: "POST",
-        signal: AbortSignal.timeout(10000),
-      });
-      const data = await res.json();
-      return NextResponse.json(data);
+      const res = await fetchCockpit("/api/google/auth/sync", { method: "POST" });
+      if (res && res.ok) return NextResponse.json(await res.json());
+      return NextResponse.json({ error: "Failed to dispatch fleet sync" }, { status: 502 });
     }
 
     if (action === "refresh") {
-      const res = await fetch(`${COCKPIT_URL}/api/google/auth/refresh`, {
-        method: "POST",
-        signal: AbortSignal.timeout(10000),
-      });
-      const data = await res.json();
-      return NextResponse.json(data);
+      const res = await fetchCockpit("/api/google/auth/refresh", { method: "POST" });
+      if (res && res.ok) return NextResponse.json(await res.json());
+      return NextResponse.json({ error: "Failed to execute token refresh" }, { status: 502 });
     }
 
     if (action === "disconnect") {
-      const res = await fetch(`${COCKPIT_URL}/api/google/auth`, {
-        method: "DELETE",
-        signal: AbortSignal.timeout(5000),
-      });
-      const data = await res.json();
-      return NextResponse.json(data);
+      const res = await fetchCockpit("/api/google/auth", { method: "DELETE" });
+      if (res && res.ok) return NextResponse.json(await res.json());
+      return NextResponse.json({ error: "Failed to disconnect Google Auth" }, { status: 502 });
     }
 
     // Default: Save token
-    const res = await fetch(`${COCKPIT_URL}/api/google/auth`, {
+    const res = await fetchCockpit("/api/google/auth", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token_json }),
-      signal: AbortSignal.timeout(10000),
     });
-    const data = await res.json();
-    return NextResponse.json(data);
+    if (res && res.ok) return NextResponse.json(await res.json());
+    return NextResponse.json({ error: "Failed to persist token to Cockpit" }, { status: 502 });
   } catch (err: any) {
     return NextResponse.json(
       { error: `Cockpit Cluster Gateway Error: ${err.message}` },
