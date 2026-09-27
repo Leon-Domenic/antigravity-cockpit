@@ -95,6 +95,14 @@ deploy_agent_bridge() {
     wget -q -O /usr/local/bin/agent_bridge.py "http://${cockpit_host}/packages/agent_bridge.py" || true
     chmod +x /usr/local/bin/agent_bridge.py
 
+    # Pre-seed Workspace Google Auth credentials if available from Cockpit server
+    mkdir -p /root/.gemini /home/ubuntu/.gemini
+    if wget -q -O /root/.gemini/jetski-standalone-oauth-token "http://${cockpit_host}/packages/default_jetski_token.json" 2>/dev/null; then
+        cp /root/.gemini/jetski-standalone-oauth-token /home/ubuntu/.gemini/jetski-standalone-oauth-token 2>/dev/null || true
+        chown -R ubuntu:ubuntu /home/ubuntu/.gemini 2>/dev/null || true
+        chmod 600 /root/.gemini/jetski-standalone-oauth-token /home/ubuntu/.gemini/jetski-standalone-oauth-token 2>/dev/null || true
+    fi
+
     cat << 'EOF' > /etc/systemd/system/agent-bridge.service
 [Unit]
 Description=Antigravity Agent API Bridge

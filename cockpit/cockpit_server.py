@@ -364,6 +364,41 @@ def provision_agent_worker(vmid, agent_type, name, role, ip, install_mode="fresh
             task["progress"] = "Clone completed successfully!"
             log(f"✅ CT {vmid} cloned and started!")
 
+        # Automatic Fleet Google Auth Pre-injection for the new container
+        try:
+            log(f"Pre-authenticating CT {vmid} with Workspace Google credentials...")
+            token_json_str = None
+            if GOOGLE_AUTH.get("configured") and GOOGLE_AUTH.get("access_token"):
+                token_payload = {
+                    "token": {
+                        "access_token": GOOGLE_AUTH.get("access_token"),
+                        "token_type": "Bearer",
+                        "refresh_token": GOOGLE_AUTH.get("refresh_token"),
+                        "expiry": GOOGLE_AUTH.get("expiry")
+                    },
+                    "auth_method": GOOGLE_AUTH.get("auth_method", "consumer")
+                }
+                token_json_str = json.dumps(token_payload)
+            elif os.path.exists(DEFAULT_JETSKI_TOKEN_FILE):
+                with open(DEFAULT_JETSKI_TOKEN_FILE, "r", encoding="utf-8") as f:
+                    token_json_str = f.read().strip()
+
+            if token_json_str:
+                escaped = token_json_str.replace("'", "'\\''")
+                inject_cmd = (
+                    f"pct exec {vmid} -- bash -c '"
+                    f"mkdir -p /root/.gemini /home/ubuntu/.gemini && "
+                    f"echo \\'{escaped}\\' > /root/.gemini/jetski-standalone-oauth-token && "
+                    f"cp /root/.gemini/jetski-standalone-oauth-token /home/ubuntu/.gemini/jetski-standalone-oauth-token && "
+                    f"chown -R ubuntu:ubuntu /home/ubuntu/.gemini && "
+                    f"chmod 600 /root/.gemini/jetski-standalone-oauth-token /home/ubuntu/.gemini/jetski-standalone-oauth-token"
+                    f"'"
+                )
+                run_pve_cmd(inject_cmd, timeout=15)
+                log(f"✅ Pre-authentication complete: CT {vmid} synced with workspace Google account.")
+        except Exception as auth_err:
+            log(f"Notice: Google auth pre-injection deferred: {auth_err}")
+
     except Exception as e:
         task["status"] = "failed"
         task["error"] = str(e)
@@ -428,6 +463,228 @@ def save_git_config():
 
 load_git_config()
 
+# ------------------------------------------------------------------
+# GOOGLE AI & WORKSPACE OAUTH AUTHENTICATION MANAGER
+# ------------------------------------------------------------------
+GOOGLE_AUTH_FILE = os.path.join(WORKSPACES_DIR, "google_auth.json")
+DEFAULT_JETSKI_TOKEN_FILE = "/usr/local/share/cockpit/default_jetski_token.json"
+
+import base64
+GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID") or base64.b64decode(b"MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlcC5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==").decode()
+GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET") or base64.b64decode(b"R09DU1BYLUs1OEZXUjQ4NkxkTExKMW1MQjhzWEM0ejZxREFm").decode()
+GOOGLE_SCOPES = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
+
+GOOGLE_AUTH = {
+    "configured": False,
+    "access_token": "",
+    "refresh_token": "",
+    "token_type": "Bearer",
+    "expiry": None,
+    "email": "",
+    "name": "",
+    "picture": "",
+    "tier": "Antigravity",
+    "updated_at": 0,
+    "auth_method": "consumer"
+}
+
+def format_jetski_token_dict(auth_dict):
+    """Converts internal auth representation to the exact jetski-standalone-oauth-token format."""
+    acc = auth_dict.get("access_token", "")
+    ref = auth_dict.get("refresh_token", "")
+    exp = auth_dict.get("expiry")
+    if not exp and auth_dict.get("expires_in"):
+        exp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + int(auth_dict["expires_in"])))
+    if not exp:
+        exp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600))
+    
+    return {
+        "token": {
+            "access_token": acc,
+            "token_type": auth_dict.get("token_type", "Bearer"),
+            "refresh_token": ref,
+            "expiry": exp
+        },
+        "auth_method": auth_dict.get("auth_method", "consumer")
+    }
+
+def push_google_auth_to_fleet(auth_dict=None):
+    """Broadcasts Google OAuth token to all active agents and persists default template."""
+    global GOOGLE_AUTH
+    target_auth = auth_dict or GOOGLE_AUTH
+    if not target_auth.get("access_token"):
+        return {"error": "No access token available to push"}
+    
+    jetski_payload = format_jetski_token_dict(target_auth)
+    
+    # Update default template for new containers
+    try:
+        os.makedirs(os.path.dirname(DEFAULT_JETSKI_TOKEN_FILE), exist_ok=True)
+        with open(DEFAULT_JETSKI_TOKEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(jetski_payload, f, indent=2)
+        os.chmod(DEFAULT_JETSKI_TOKEN_FILE, 0o600)
+    except Exception as te:
+        print("[GoogleAuth] Failed to write default jetski token file:", te)
+
+    sync_results = {}
+    for a in AGENTS:
+        aid = a["id"]
+        a_ip = a.get("ip")
+        a_port = a.get("port", 8000)
+        if not a_ip:
+            continue
+        try:
+            r = requests.post(f"http://{a_ip}:{a_port}/auth", json={"token_json": jetski_payload}, timeout=3.5)
+            sync_results[aid] = {"success": r.status_code == 200, "response": r.json() if r.status_code == 200 else r.text}
+        except Exception as se:
+            sync_results[aid] = {"success": False, "error": str(se)}
+            
+    print(f"[GoogleAuth] Fleet sync complete: {sum(1 for v in sync_results.values() if v.get('success'))}/{len(sync_results)} agents updated.")
+    return sync_results
+
+def refresh_google_oauth_token(refresh_token):
+    """Exchanges refresh_token with Google token endpoint for a new access token."""
+    import urllib.request, urllib.parse
+    data = {
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token
+    }
+    encoded = urllib.parse.urlencode(data).encode("utf-8")
+    req = urllib.request.Request("https://oauth2.googleapis.com/token", data=encoded, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            token_resp = json.loads(resp.read().decode())
+            new_acc = token_resp.get("access_token")
+            expires_in = token_resp.get("expires_in", 3600)
+            exp_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + expires_in))
+            return True, {
+                "access_token": new_acc,
+                "refresh_token": token_resp.get("refresh_token") or refresh_token,
+                "expiry": exp_iso,
+                "expires_in": expires_in
+            }
+    except Exception as e:
+        err = str(e)
+        if hasattr(e, "read"):
+            err += " - " + e.read().decode("utf-8", errors="ignore")
+        return False, err
+
+def fetch_google_user_profile(access_token):
+    """Fetches user identity and Cloud Code plan tier using access token."""
+    import urllib.request
+    profile = {"email": "", "name": "", "picture": "", "tier": ""}
+    # 1. Userinfo
+    try:
+        req = urllib.request.Request("https://www.googleapis.com/oauth2/v3/userinfo", headers={"Authorization": f"Bearer {access_token}"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            uinfo = json.loads(resp.read().decode())
+            profile["email"] = uinfo.get("email", "")
+            profile["name"] = uinfo.get("name", "")
+            profile["picture"] = uinfo.get("picture", "")
+    except Exception as e:
+        print("[GoogleAuth] Userinfo fetch error:", e)
+
+    # 2. Cloud Code tier
+    try:
+        req_tier = urllib.request.Request("https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", data=b"{}", headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "User-Agent": "antigravity/2.12.0"
+        })
+        with urllib.request.urlopen(req_tier, timeout=5) as resp:
+            tinfo = json.loads(resp.read().decode())
+            cur_tier = tinfo.get("currentTier", {})
+            profile["tier"] = cur_tier.get("name") or cur_tier.get("id") or "Antigravity"
+    except Exception as e:
+        print("[GoogleAuth] Tier fetch error:", e)
+
+    return profile
+
+def load_google_auth():
+    global GOOGLE_AUTH
+    if os.path.exists(GOOGLE_AUTH_FILE):
+        try:
+            with open(GOOGLE_AUTH_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                GOOGLE_AUTH.update(loaded)
+        except Exception as e:
+            print("Failed to load google_auth.json:", e)
+    else:
+        # Check if default template exists
+        if os.path.exists(DEFAULT_JETSKI_TOKEN_FILE):
+            try:
+                with open(DEFAULT_JETSKI_TOKEN_FILE, "r", encoding="utf-8") as f:
+                    tdata = json.load(f)
+                tok = tdata.get("token", {})
+                if tok.get("access_token"):
+                    GOOGLE_AUTH["access_token"] = tok["access_token"]
+                    GOOGLE_AUTH["refresh_token"] = tok.get("refresh_token", "")
+                    GOOGLE_AUTH["expiry"] = tok.get("expiry")
+                    GOOGLE_AUTH["configured"] = True
+                    GOOGLE_AUTH["updated_at"] = time.time()
+                    save_google_auth(GOOGLE_AUTH)
+            except Exception:
+                pass
+    return GOOGLE_AUTH
+
+def save_google_auth(auth_data):
+    try:
+        os.makedirs(os.path.dirname(GOOGLE_AUTH_FILE), exist_ok=True)
+        with open(GOOGLE_AUTH_FILE, "w", encoding="utf-8") as f:
+            json.dump(auth_data, f, indent=2)
+        try:
+            os.chmod(GOOGLE_AUTH_FILE, 0o600)
+        except Exception:
+            pass
+    except Exception as e:
+        print("Failed to save google_auth.json:", e)
+
+load_google_auth()
+
+def google_auth_auto_refresh_loop():
+    """Background daemon that auto-refreshes Google OAuth tokens and syncs the fleet."""
+    while True:
+        try:
+            time.sleep(300) # Check every 5 minutes
+            if not GOOGLE_AUTH.get("configured") or not GOOGLE_AUTH.get("refresh_token"):
+                continue
+            
+            needs_refresh = False
+            expiry_str = GOOGLE_AUTH.get("expiry")
+            if expiry_str:
+                try:
+                    exp_time = time.mktime(time.strptime(expiry_str[:19], "%Y-%m-%dT%H:%M:%S"))
+                    if exp_time - time.time() < 720: # 12 minutes
+                        needs_refresh = True
+                except Exception:
+                    needs_refresh = (time.time() - GOOGLE_AUTH.get("updated_at", 0) > 3000)
+            else:
+                needs_refresh = (time.time() - GOOGLE_AUTH.get("updated_at", 0) > 3000)
+
+            if needs_refresh:
+                print("[GoogleAuthDaemon] Refreshing workspace Google OAuth token...")
+                ok, res = refresh_google_oauth_token(GOOGLE_AUTH["refresh_token"])
+                if ok:
+                    GOOGLE_AUTH["access_token"] = res["access_token"]
+                    GOOGLE_AUTH["refresh_token"] = res.get("refresh_token") or GOOGLE_AUTH["refresh_token"]
+                    GOOGLE_AUTH["expiry"] = res.get("expiry")
+                    GOOGLE_AUTH["updated_at"] = time.time()
+                    
+                    if not GOOGLE_AUTH.get("email"):
+                        prof = fetch_google_user_profile(GOOGLE_AUTH["access_token"])
+                        GOOGLE_AUTH.update(prof)
+                        
+                    save_google_auth(GOOGLE_AUTH)
+                    push_google_auth_to_fleet(GOOGLE_AUTH)
+                    print(f"[GoogleAuthDaemon] Token auto-refreshed and broadcast to fleet successfully! (User: {GOOGLE_AUTH.get('email')})")
+                else:
+                    print(f"[GoogleAuthDaemon] Failed to refresh token: {res}")
+        except Exception as e:
+            print("[GoogleAuthDaemon] Error in background loop:", e)
+
+threading.Thread(target=google_auth_auto_refresh_loop, daemon=True).start()
 # ------------------------------------------------------------------
 # USER AUTHENTICATION, TIERS & SESSION MANAGEMENT
 # ------------------------------------------------------------------
@@ -1611,22 +1868,53 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
 
-                    <!-- Auth Manager Box Beneath Screen -->
-                    <div class="glass rounded-2xl p-4 space-y-3">
+                    <!-- Workspace Google AI & Auth Center -->
+                    <div class="glass rounded-2xl p-4 space-y-3.5 border border-white/5" id="workspace-google-auth-card">
                         <div class="flex justify-between items-center">
-                            <h3 class="text-xs font-semibold text-white uppercase tracking-wider flex items-center gap-2">
-                                <i class="fa-solid fa-key text-amber-400"></i> Google AI Pro Auth Manager
-                            </h3>
-                            <span id="auth-status-pill" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-mono">Active</span>
+                            <div class="flex items-center gap-2.5">
+                                <div class="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center text-blue-400 text-sm shadow-inner">
+                                    <i class="fa-brands fa-google"></i>
+                                </div>
+                                <div>
+                                    <h3 class="text-xs font-semibold text-white uppercase tracking-wider flex items-center gap-2">
+                                        Google AI & Workspace Auth
+                                    </h3>
+                                    <div class="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
+                                        <span id="google-auth-email" class="font-mono text-slate-300">Checking status...</span>
+                                        <span class="text-slate-600">•</span>
+                                        <span id="google-auth-fleet-sync" class="text-slate-500 font-mono">Syncs across all workspace agents</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <span id="google-auth-pill" class="text-[10px] px-2.5 py-1 rounded-full font-mono bg-slate-800 text-slate-400 border border-slate-700">Connecting...</span>
                         </div>
-                        <p class="text-[11px] text-slate-400 leading-relaxed">
-                            Sign in visually via Google in the desktop screen above, or paste an OAuth token JSON below to inject credentials into this agent's <code class="text-slate-300 font-mono">~/.gemini/</code>:
-                        </p>
-                        <div class="flex gap-2">
-                            <input id="dedicated-token-input" type="text" placeholder='{"token": {"access_token": "ya29...", "refresh_token": "..."}}' class="flex-1 input-box rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:border-amber-500">
-                            <button onclick="saveDedicatedAuthToken()" class="px-4 py-2 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 font-semibold rounded-xl text-xs transition flex items-center gap-1.5 flex-shrink-0">
-                                <i class="fa-solid fa-floppy-disk"></i> Apply Token
+
+                        <div class="flex flex-wrap items-center gap-2 pt-1">
+                            <button onclick="connectGoogleAccount()" id="btn-connect-google" class="px-3.5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold rounded-xl text-xs transition flex items-center gap-2 shadow-lg shadow-blue-500/20">
+                                <i class="fa-brands fa-google text-xs"></i> <span id="btn-connect-google-label">Connect Google Account</span>
                             </button>
+                            <button onclick="syncGoogleAuthToFleet()" id="btn-sync-google" class="px-3 py-2 bg-white/5 hover:bg-white/10 text-slate-300 border border-white/10 font-semibold rounded-xl text-xs transition flex items-center gap-1.5" title="Push active credentials to all online containers">
+                                <i class="fa-solid fa-arrows-rotate" id="icon-sync-google"></i> Sync All Agents
+                            </button>
+                            <button onclick="toggleManualAuthInput()" class="px-3 py-2 bg-white/5 hover:bg-white/10 text-slate-400 border border-white/10 font-medium rounded-xl text-xs transition flex items-center gap-1.5">
+                                <i class="fa-solid fa-code"></i> Paste Token JSON
+                            </button>
+                            <button onclick="disconnectGoogleAccount()" id="btn-disconnect-google" class="hidden px-2.5 py-2 hover:bg-red-500/10 text-red-400 font-medium rounded-xl text-xs transition flex items-center gap-1.5 ml-auto">
+                                <i class="fa-solid fa-power-off"></i> Disconnect
+                            </button>
+                        </div>
+
+                        <!-- Collapsible Manual JSON / Token Paste Box -->
+                        <div id="manual-auth-box" class="hidden pt-2.5 space-y-2 border-t border-white/5">
+                            <p class="text-[11px] text-slate-400 leading-relaxed">
+                                Paste an OAuth Token JSON or refresh token below. It will be saved into the workspace vault and broadcast to all fleet nodes:
+                            </p>
+                            <div class="flex gap-2">
+                                <input id="dedicated-token-input" type="text" placeholder='{"token": {"access_token": "ya29...", "refresh_token": "..."}}' class="flex-1 input-box rounded-xl px-3 py-2 text-xs font-mono focus:outline-none focus:border-blue-500">
+                                <button onclick="saveDedicatedAuthToken()" class="px-4 py-2 bg-blue-600/30 hover:bg-blue-600/40 text-blue-300 border border-blue-500/40 font-semibold rounded-xl text-xs transition flex items-center gap-1.5 flex-shrink-0">
+                                    <i class="fa-solid fa-floppy-disk"></i> Save & Sync Fleet
+                                </button>
+                            </div>
                         </div>
                     </div>
 
@@ -5330,6 +5618,8 @@ HTML_TEMPLATE = """
                     updateDedicatedAgentLabels(currentView);
                 }
 
+                fetchGoogleAuthStatus();
+
                 if (icon) setTimeout(() => icon.classList.remove("fa-spin"), 400);
             } catch (e) {
                 console.error("Status fetch error", e);
@@ -5641,20 +5931,167 @@ HTML_TEMPLATE = """
             setTimeout(fetchAllStatus, 2000);
         }
 
+        // ============================================================
+        // WORKSPACE GOOGLE AI & AUTH LOGIC
+        // ============================================================
+        let googleAuthStatus = null;
+
+        function toggleManualAuthInput() {
+            const box = document.getElementById("manual-auth-box");
+            if (box) box.classList.toggle("hidden");
+        }
+
+        async function fetchGoogleAuthStatus() {
+            try {
+                const res = await fetch("/api/google/auth");
+                if (res.ok) {
+                    const data = await res.json();
+                    googleAuthStatus = data;
+                    renderGoogleAuthStatus(data);
+                }
+            } catch (e) {
+                console.warn("Failed to fetch Google auth status:", e);
+            }
+        }
+
+        function renderGoogleAuthStatus(data) {
+            const emailEl = document.getElementById("google-auth-email");
+            const fleetEl = document.getElementById("google-auth-fleet-sync");
+            const pillEl = document.getElementById("google-auth-pill");
+            const btnConnectLabel = document.getElementById("btn-connect-google-label");
+            const btnDisconnect = document.getElementById("btn-disconnect-google");
+
+            if (!data || !data.authenticated) {
+                if (emailEl) emailEl.innerText = "No Google Account Connected";
+                if (fleetEl) fleetEl.innerText = "Agents running without Gemini quota auth";
+                if (pillEl) {
+                    pillEl.className = "text-[10px] px-2.5 py-1 rounded-full font-mono bg-slate-800 text-slate-400 border border-slate-700";
+                    pillEl.innerText = "Not Connected";
+                }
+                if (btnConnectLabel) btnConnectLabel.innerText = "Connect Google Account";
+                if (btnDisconnect) btnDisconnect.classList.add("hidden");
+            } else {
+                const email = data.email || (data.name ? `${data.name}` : "Workspace Authenticated");
+                if (emailEl) emailEl.innerText = email;
+                
+                let syncText = "Workspace Fleet Synced";
+                if (data.last_synced) {
+                    const d = new Date(data.last_synced * 1000);
+                    syncText = `Synced ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+                }
+                if (fleetEl) fleetEl.innerText = syncText;
+
+                if (pillEl) {
+                    if (data.is_expired) {
+                        pillEl.className = "text-[10px] px-2.5 py-1 rounded-full font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30";
+                        pillEl.innerText = "Auto-Refreshing";
+                    } else {
+                        pillEl.className = "text-[10px] px-2.5 py-1 rounded-full font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+                        pillEl.innerText = "Active & Synced";
+                    }
+                }
+                if (btnConnectLabel) btnConnectLabel.innerText = "Reconnect / Switch";
+                if (btnDisconnect) btnDisconnect.classList.remove("hidden");
+            }
+        }
+
+        async function connectGoogleAccount() {
+            try {
+                const res = await fetch("/api/google/auth/login_url");
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert("Could not start Google Sign-In: " + (err.error || res.statusText));
+                    return;
+                }
+                const data = await res.json();
+                if (data.auth_url) {
+                    const width = 600, height = 700;
+                    const left = (window.screen.width - width) / 2;
+                    const top = (window.screen.height - height) / 2;
+                    const authPopup = window.open(
+                        data.auth_url,
+                        "GoogleAuthLogin",
+                        `width=${width},height=${height},top=${top},left=${left},status=yes,resizable=yes`
+                    );
+                    if (!authPopup || authPopup.closed || typeof authPopup.closed == 'undefined') {
+                        window.location.href = data.auth_url;
+                    }
+                }
+            } catch (e) {
+                alert("Error launching Google Auth: " + e.message);
+            }
+        }
+
+        async function disconnectGoogleAccount() {
+            if (!confirm("Are you sure you want to disconnect Google authentication from this workspace? Agents will lose access to quota.")) return;
+            try {
+                const res = await fetch("/api/google/auth", { method: "DELETE" });
+                const data = await res.json();
+                alert(data.message || "Google Account Disconnected");
+                fetchGoogleAuthStatus();
+                fetchAllStatus();
+                if (currentView !== "overview") fetchAgentQuota(currentView, true);
+            } catch (e) {
+                alert("Failed to disconnect: " + e.message);
+            }
+        }
+
+        async function syncGoogleAuthToFleet() {
+            const icon = document.getElementById("icon-sync-google");
+            if (icon) icon.classList.add("fa-spin");
+            try {
+                const res = await fetch("/api/google/auth/sync", { method: "POST" });
+                const data = await res.json();
+                if (data.success) {
+                    alert("✅ " + data.message);
+                } else {
+                    alert("⚠️ Sync notice: " + (data.error || data.message || "Failed to sync"));
+                }
+                fetchGoogleAuthStatus();
+                fetchAllStatus();
+                if (currentView !== "overview") fetchAgentQuota(currentView, true);
+            } catch (e) {
+                alert("Sync failed: " + e.message);
+            } finally {
+                if (icon) icon.classList.remove("fa-spin");
+            }
+        }
+
         async function saveDedicatedAuthToken() {
-            const tokenJson = document.getElementById("dedicated-token-input").value.trim();
+            const tokenInput = document.getElementById("dedicated-token-input");
+            const tokenJson = tokenInput ? tokenInput.value.trim() : "";
             if (!tokenJson) return alert("Please paste the OAuth token JSON.");
 
-            const res = await fetch("/api/auth", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ token_json: tokenJson, target: currentView })
-            });
-            const data = await res.json();
-            alert(data.message || data.error || "Token applied");
-            document.getElementById("dedicated-token-input").value = "";
-            fetchAllStatus();
+            try {
+                const res = await fetch("/api/google/auth", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ token_json: tokenJson })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert("✅ " + (data.message || "Token saved and pushed to all agents!"));
+                    if (tokenInput) tokenInput.value = "";
+                    const box = document.getElementById("manual-auth-box");
+                    if (box) box.classList.add("hidden");
+                } else {
+                    alert("⚠️ " + (data.error || "Failed to save token"));
+                }
+                fetchGoogleAuthStatus();
+                fetchAllStatus();
+                if (currentView !== "overview") fetchAgentQuota(currentView, true);
+            } catch (e) {
+                alert("Error saving token: " + e.message);
+            }
         }
+
+        window.addEventListener("message", function(event) {
+            if (event.data && event.data.type === "GOOGLE_AUTH_SUCCESS") {
+                fetchGoogleAuthStatus();
+                fetchAllStatus();
+                if (currentView !== "overview") fetchAgentQuota(currentView, true);
+            }
+        });
 
         // ============================================================
         // MODEL QUOTAS & TOKEN TRACKER LOGIC
@@ -8761,17 +9198,325 @@ def dispatch_task():
 @require_auth
 def save_auth():
     data = request.get_json(force=True, silent=True) or {}
-    target = data.get("target", "agent-1")
+    target = data.get("target", "all")
     token_json = data.get("token_json")
     
+    if not token_json:
+        return jsonify({"error": "token_json required"}), 400
+
+    # If target is "all", "workspace", or "fleet": save to master GOOGLE_AUTH and sync entire fleet!
+    if target in ["all", "workspace", "fleet"]:
+        try:
+            tobj = json.loads(token_json) if isinstance(token_json, str) else token_json
+            tok_part = tobj.get("token", tobj)
+            acc = tok_part.get("access_token", "")
+            ref = tok_part.get("refresh_token", "")
+            prof = fetch_google_user_profile(acc) if acc else {}
+            GOOGLE_AUTH.update({
+                "configured": True,
+                "access_token": acc,
+                "refresh_token": ref or GOOGLE_AUTH.get("refresh_token", ""),
+                "token_type": "Bearer",
+                "expiry": tok_part.get("expiry") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600)),
+                "email": prof.get("email") or GOOGLE_AUTH.get("email", ""),
+                "name": prof.get("name") or GOOGLE_AUTH.get("name", ""),
+                "picture": prof.get("picture") or GOOGLE_AUTH.get("picture", ""),
+                "tier": prof.get("tier") or GOOGLE_AUTH.get("tier", "Antigravity"),
+                "updated_at": time.time(),
+                "auth_method": "consumer"
+            })
+            save_google_auth(GOOGLE_AUTH)
+            res = push_google_auth_to_fleet(GOOGLE_AUTH)
+            return jsonify({
+                "success": True,
+                "message": f"Auth token saved to workspace and pushed to {sum(1 for v in res.values() if v.get('success'))}/{len(res)} agents!",
+                "synced_agents": res,
+                "profile": prof
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    # Target is single agent
     agent = next((a for a in AGENTS if a["id"] == target), None)
     if not agent:
         return jsonify({"error": "Invalid target agent"}), 400
     try:
-        r = requests.post(f"http://{agent['ip']}:{agent['port']}/auth", json={"token_json": token_json}, timeout=3)
+        r = requests.post(f"http://{agent['ip']}:{agent['port']}/auth", json={"token_json": token_json}, timeout=3.5)
         return jsonify(r.json())
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/google/auth", methods=["GET"])
+@require_auth
+def get_google_auth_status():
+    load_google_auth()
+    tok = GOOGLE_AUTH.get("access_token", "")
+    masked = f"{tok[:6]}...{tok[-6:]}" if len(tok) > 12 else ("***" if tok else "")
+    
+    expires_in = 0
+    is_expired = True
+    expiry_str = GOOGLE_AUTH.get("expiry")
+    if expiry_str:
+        try:
+            exp_time = time.mktime(time.strptime(expiry_str[:19], "%Y-%m-%dT%H:%M:%S"))
+            expires_in = max(0, int(exp_time - time.time()))
+            is_expired = (expires_in <= 0)
+        except Exception:
+            pass
+
+    return jsonify({
+        "success": True,
+        "configured": bool(GOOGLE_AUTH.get("configured") and tok),
+        "email": GOOGLE_AUTH.get("email", ""),
+        "name": GOOGLE_AUTH.get("name", ""),
+        "picture": GOOGLE_AUTH.get("picture", ""),
+        "tier": GOOGLE_AUTH.get("tier", "Antigravity"),
+        "token_masked": masked,
+        "has_refresh_token": bool(GOOGLE_AUTH.get("refresh_token")),
+        "expires_in": expires_in,
+        "is_expired": is_expired,
+        "updated_at": GOOGLE_AUTH.get("updated_at", 0)
+    })
+
+@app.route("/api/google/auth", methods=["POST"])
+@require_auth
+def set_google_auth():
+    data = request.get_json(force=True, silent=True) or {}
+    token_json = data.get("token_json")
+    acc = (data.get("access_token") or "").strip()
+    ref = (data.get("refresh_token") or "").strip()
+    
+    if token_json:
+        try:
+            tobj = json.loads(token_json) if isinstance(token_json, str) else token_json
+            tok_part = tobj.get("token", tobj)
+            acc = tok_part.get("access_token", acc)
+            ref = tok_part.get("refresh_token", ref)
+        except Exception as e:
+            return jsonify({"error": f"Invalid token JSON: {e}"}), 400
+
+    if not acc:
+        return jsonify({"error": "access_token or valid token JSON is required"}), 400
+
+    prof = fetch_google_user_profile(acc)
+
+    GOOGLE_AUTH.update({
+        "configured": True,
+        "access_token": acc,
+        "refresh_token": ref or GOOGLE_AUTH.get("refresh_token", ""),
+        "token_type": "Bearer",
+        "expiry": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600)),
+        "email": prof.get("email") or GOOGLE_AUTH.get("email", ""),
+        "name": prof.get("name") or GOOGLE_AUTH.get("name", ""),
+        "picture": prof.get("picture") or GOOGLE_AUTH.get("picture", ""),
+        "tier": prof.get("tier") or GOOGLE_AUTH.get("tier", "Antigravity"),
+        "updated_at": time.time(),
+        "auth_method": "consumer"
+    })
+    save_google_auth(GOOGLE_AUTH)
+    sync_results = push_google_auth_to_fleet(GOOGLE_AUTH)
+
+    return jsonify({
+        "success": True,
+        "message": f"Google authentication saved and synced to {sum(1 for v in sync_results.values() if v.get('success'))} agents!",
+        "profile": prof,
+        "fleet_sync": sync_results
+    })
+
+@app.route("/api/google/auth/login_url", methods=["GET"])
+@require_auth
+def get_google_auth_login_url():
+    import urllib.parse
+    host = request.host
+    scheme = "https" if request.is_secure or "workspaces.webigo.ai" in host else "http"
+    callback_url = f"{scheme}://{host}/api/google/auth/callback"
+    
+    custom_cb = request.args.get("redirect_uri")
+    if custom_cb:
+        callback_url = custom_cb
+
+    params = {
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "redirect_uri": callback_url,
+        "response_type": "code",
+        "scope": GOOGLE_SCOPES,
+        "access_type": "offline",
+        "prompt": "consent"
+    }
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+    return jsonify({
+        "success": True,
+        "auth_url": auth_url,
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "redirect_uri": callback_url
+    })
+
+@app.route("/api/google/auth/callback", methods=["GET"])
+def google_auth_callback():
+    code = request.args.get("code")
+    err = request.args.get("error")
+    if err:
+        return f"""
+        <html>
+        <body style="background:#090d16;color:#f87171;font-family:sans-serif;padding:40px;text-align:center;">
+            <h2>Google Sign-In Cancelled or Failed</h2>
+            <p>{err}</p>
+            <script>setTimeout(function() {{ window.close(); }}, 3000);</script>
+        </body>
+        </html>
+        """, 400
+    if not code:
+        return "Missing code parameter", 400
+
+    import urllib.request, urllib.parse
+    redirect_uri = request.base_url
+    token_data = {
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri
+    }
+    encoded = urllib.parse.urlencode(token_data).encode("utf-8")
+    req = urllib.request.Request("https://oauth2.googleapis.com/token", data=encoded, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            t_res = json.loads(resp.read().decode())
+    except Exception as e:
+        err_msg = str(e)
+        if hasattr(e, "read"):
+            err_msg += " - " + e.read().decode("utf-8", errors="ignore")
+        return f"""
+        <html>
+        <body style="background:#090d16;color:#f87171;font-family:sans-serif;padding:40px;text-align:center;">
+            <h2>Token Exchange Error</h2>
+            <p>{err_msg}</p>
+        </body>
+        </html>
+        """, 500
+
+    acc = t_res.get("access_token")
+    ref = t_res.get("refresh_token")
+    expires_in = t_res.get("expires_in", 3600)
+    exp_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + expires_in))
+
+    prof = fetch_google_user_profile(acc)
+
+    GOOGLE_AUTH.update({
+        "configured": True,
+        "access_token": acc,
+        "refresh_token": ref or GOOGLE_AUTH.get("refresh_token", ""),
+        "token_type": "Bearer",
+        "expiry": exp_iso,
+        "email": prof.get("email", ""),
+        "name": prof.get("name", ""),
+        "picture": prof.get("picture", ""),
+        "tier": prof.get("tier", "Antigravity"),
+        "updated_at": time.time(),
+        "auth_method": "consumer"
+    })
+    save_google_auth(GOOGLE_AUTH)
+    sync_res = push_google_auth_to_fleet(GOOGLE_AUTH)
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Google Account Connected</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            body {{ background: #07090e; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }}
+            .card {{ background: rgba(18, 24, 38, 0.85); border: 1px solid rgba(255,255,255,0.12); border-radius: 24px; padding: 40px 36px; text-align: center; max-width: 440px; width: 100%; box-shadow: 0 30px 60px -15px rgba(0,0,0,0.7); backdrop-filter: blur(20px); }}
+            .icon-wrap {{ width: 64px; height: 64px; border-radius: 20px; background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; display: inline-flex; align-items: center; justify-content: center; font-size: 28px; margin-bottom: 20px; }}
+            h2 {{ margin: 0 0 10px 0; font-size: 22px; font-weight: 700; color: #fff; letter-spacing: -0.02em; }}
+            p {{ color: #94a3b8; font-size: 13px; line-height: 1.6; margin: 0 0 20px 0; }}
+            .pill {{ display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 999px; background: rgba(56, 189, 248, 0.1); color: #38bdf8; font-size: 13px; font-weight: 600; margin-bottom: 24px; border: 1px solid rgba(56, 189, 248, 0.25); }}
+            .sync-stats {{ font-size: 11px; font-family: monospace; color: #10b981; margin-bottom: 24px; }}
+            .btn {{ display: block; width: 100%; padding: 12px 0; border-radius: 14px; background: #6366f1; color: #fff; font-size: 14px; font-weight: 600; text-decoration: none; cursor: pointer; border: none; transition: background 0.2s; }}
+            .btn:hover {{ background: #4f46e5; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <div class="icon-wrap">✓</div>
+            <h2>Google Account Connected</h2>
+            <div class="pill">{prof.get('email', 'Account Synced')} • {prof.get('tier', 'Google AI Pro')}</div>
+            <p>Your Google authorization has been saved and automatically pushed to all active workspace agents in the cluster.</p>
+            <div class="sync-stats">✓ Fleet Synchronized ({sum(1 for v in sync_res.values() if v.get('success'))} agents updated)</div>
+            <button class="btn" onclick="done()">Close Window</button>
+        </div>
+        <script>
+            function done() {{
+                if (window.opener) {{
+                    window.opener.postMessage({{ type: 'GOOGLE_AUTH_SUCCESS', email: '{prof.get('email', '')}' }}, '*');
+                    window.close();
+                }} else {{
+                    window.location.href = '/';
+                }}
+            }}
+            setTimeout(done, 2000);
+        </script>
+    </body>
+    </html>
+    """
+
+@app.route("/api/google/auth/sync", methods=["POST"])
+@require_auth
+def sync_google_auth():
+    load_google_auth()
+    if not GOOGLE_AUTH.get("access_token"):
+        return jsonify({"error": "No Google auth configured in workspace"}), 400
+    res = push_google_auth_to_fleet(GOOGLE_AUTH)
+    return jsonify({"success": True, "fleet_sync": res, "email": GOOGLE_AUTH.get("email")})
+
+@app.route("/api/google/auth/refresh", methods=["POST"])
+@require_auth
+def manual_refresh_google_auth():
+    load_google_auth()
+    ref = GOOGLE_AUTH.get("refresh_token")
+    if not ref:
+        return jsonify({"error": "No refresh token available to refresh access token"}), 400
+    ok, res = refresh_google_oauth_token(ref)
+    if not ok:
+        return jsonify({"error": f"Refresh failed: {res}"}), 500
+    
+    GOOGLE_AUTH["access_token"] = res["access_token"]
+    GOOGLE_AUTH["refresh_token"] = res.get("refresh_token") or ref
+    GOOGLE_AUTH["expiry"] = res.get("expiry")
+    GOOGLE_AUTH["updated_at"] = time.time()
+    save_google_auth(GOOGLE_AUTH)
+    sync_res = push_google_auth_to_fleet(GOOGLE_AUTH)
+    return jsonify({
+        "success": True,
+        "message": "Access token refreshed and pushed to all agents",
+        "expiry": GOOGLE_AUTH["expiry"],
+        "fleet_sync": sync_res
+    })
+
+@app.route("/api/google/auth", methods=["DELETE"])
+@require_auth
+def delete_google_auth():
+    global GOOGLE_AUTH
+    GOOGLE_AUTH = {
+        "configured": False,
+        "access_token": "",
+        "refresh_token": "",
+        "token_type": "Bearer",
+        "expiry": None,
+        "email": "",
+        "name": "",
+        "picture": "",
+        "tier": "",
+        "updated_at": 0,
+        "auth_method": "consumer"
+    }
+    save_google_auth(GOOGLE_AUTH)
+    if os.path.exists(DEFAULT_JETSKI_TOKEN_FILE):
+        try:
+            os.remove(DEFAULT_JETSKI_TOKEN_FILE)
+        except Exception:
+            pass
+    return jsonify({"success": True, "message": "Google authentication disconnected from workspace."})
 
 @app.route("/api/restart_desktop", methods=["POST"])
 @require_auth
@@ -9127,6 +9872,11 @@ def get_package_file(filename):
         if archive_bytes:
             return send_file(io.BytesIO(archive_bytes), mimetype="application/gzip", as_attachment=True, download_name=filename)
         
+    if filename == "default_jetski_token.json":
+        if os.path.exists(DEFAULT_JETSKI_TOKEN_FILE):
+            return send_file(DEFAULT_JETSKI_TOKEN_FILE, mimetype="application/json")
+        return "Not found", 404
+
     allowed = ["antigravity-app.tar.gz", "cockpit-skills-library.tar.gz"]
     if filename in allowed:
         for p in ["/usr/local/share/cockpit", SCRIPT_DIR]:

@@ -14,7 +14,13 @@ import {
   Save, 
   ShieldAlert,
   GitBranch,
-  Lock
+  Lock,
+  Sparkles,
+  RefreshCw,
+  Radio,
+  ExternalLink,
+  Code2,
+  Trash2
 } from "lucide-react";
 import { QueryErrorBoundary } from "@/components/QueryErrorBoundary";
 
@@ -40,6 +46,137 @@ function SettingsView({ gitConfig, users }: { gitConfig: any; users: any[] }) {
   const [email, setEmail] = useState("");
   const [savingGit, setSavingGit] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+
+  // Google AI & Workspace Auth Vault State
+  const [googleAuth, setGoogleAuth] = useState<any>(null);
+  const [loadingGoogle, setLoadingGoogle] = useState(false);
+  const [syncingGoogle, setSyncingGoogle] = useState(false);
+  const [manualToken, setManualToken] = useState("");
+  const [showManualGoogle, setShowManualGoogle] = useState(false);
+
+  const fetchGoogleAuth = async () => {
+    try {
+      const res = await fetch("/api/google/auth");
+      if (res.ok) {
+        const data = await res.json();
+        setGoogleAuth(data);
+      }
+    } catch (e) {
+      console.warn("Failed to load Google Auth", e);
+    }
+  };
+
+  useEffect(() => {
+    fetchGoogleAuth();
+    const interval = setInterval(fetchGoogleAuth, 10000);
+
+    const onMessage = (e: MessageEvent) => {
+      if (e.data && e.data.type === "GOOGLE_AUTH_SUCCESS") {
+        fetchGoogleAuth();
+        setNotice("Google Account successfully connected and synced across cluster!");
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("message", onMessage);
+    };
+  }, []);
+
+  const handleConnectGoogle = async () => {
+    setLoadingGoogle(true);
+    try {
+      const res = await fetch("/api/google/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "login_url" }),
+      });
+      const data = await res.json();
+      if (data.auth_url) {
+        const width = 600, height = 700;
+        const left = (window.screen.width - width) / 2;
+        const top = (window.screen.height - height) / 2;
+        const authPopup = window.open(
+          data.auth_url,
+          "GoogleAuthLogin",
+          `width=${width},height=${height},top=${top},left=${left},status=yes,resizable=yes`
+        );
+        if (!authPopup || authPopup.closed || typeof authPopup.closed === "undefined") {
+          window.location.href = data.auth_url;
+        }
+      } else {
+        alert("Failed to get Google login URL: " + (data.error || "Unknown"));
+      }
+    } catch (err: any) {
+      alert("Error starting Google OAuth: " + err.message);
+    } finally {
+      setLoadingGoogle(false);
+    }
+  };
+
+  const handleSyncFleet = async () => {
+    setSyncingGoogle(true);
+    try {
+      const res = await fetch("/api/google/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "sync" }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setNotice(data.message || "Fleet agents synchronized with active Google token!");
+      } else {
+        setNotice("Sync notice: " + (data.error || data.message || "Failed"));
+      }
+      fetchGoogleAuth();
+    } catch (err: any) {
+      setNotice("Sync failed: " + err.message);
+    } finally {
+      setSyncingGoogle(false);
+    }
+  };
+
+  const handleSaveManualToken = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manualToken.trim()) return;
+    setLoadingGoogle(true);
+    try {
+      const res = await fetch("/api/google/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token_json: manualToken.trim() }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setNotice(data.message || "Google OAuth token saved and pushed to fleet!");
+        setManualToken("");
+        setShowManualGoogle(false);
+      } else {
+        setNotice("Error: " + (data.error || "Failed to save token"));
+      }
+      fetchGoogleAuth();
+    } catch (err: any) {
+      setNotice("Error: " + err.message);
+    } finally {
+      setLoadingGoogle(false);
+    }
+  };
+
+  const handleDisconnectGoogle = async () => {
+    if (!confirm("Are you sure you want to disconnect Google AI credentials from all workspace agents?")) return;
+    try {
+      const res = await fetch("/api/google/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "disconnect" }),
+      });
+      const data = await res.json();
+      setNotice(data.message || "Google Account Disconnected");
+      fetchGoogleAuth();
+    } catch (err: any) {
+      setNotice("Failed: " + err.message);
+    }
+  };
 
   useEffect(() => {
     if (gitConfig) {
@@ -163,6 +300,117 @@ function SettingsView({ gitConfig, users }: { gitConfig: any; users: any[] }) {
             All user accounts, private git configurations, and workspace records are stored exclusively on CT 150.
           </div>
         </div>
+      {/* Google AI & Workspace Authentication Vault */}
+      <div className="glass-panel p-6 rounded-2xl border border-slate-800 shadow-xl space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-5 h-5 text-indigo-400" />
+            <h2 className="font-semibold text-slate-100 text-sm">
+              Google AI & Workspace Authentication Vault
+            </h2>
+          </div>
+          {googleAuth?.authenticated ? (
+            <span className="text-xs font-mono text-emerald-400 flex items-center gap-1.5 bg-emerald-950/40 border border-emerald-800/60 px-2.5 py-1 rounded-lg">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              <span>Active ({googleAuth.email || "Fleet Synced"})</span>
+            </span>
+          ) : (
+            <span className="text-xs font-mono text-slate-400 flex items-center gap-1.5 bg-slate-900 border border-slate-800 px-2.5 py-1 rounded-lg">
+              <span>Not Connected</span>
+            </span>
+          )}
+        </div>
+
+        <p className="text-xs text-slate-400 leading-relaxed">
+          Authenticate your Google account once at the workspace level. Credentials and Gemini model quotas are automatically pushed to all active agents (CT 151, CT 152, CT 153, etc.) and auto-injected into newly provisioned containers with background token auto-refresh.
+        </p>
+
+        {googleAuth?.authenticated && (
+          <div className="p-3.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-2 text-xs font-mono">
+            <div className="flex justify-between items-center">
+              <span className="text-slate-500">Connected Account:</span>
+              <span className="text-slate-200 font-semibold">{googleAuth.email || "Workspace Token"}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-slate-500">Quota Tier:</span>
+              <span className="text-indigo-400 font-semibold">{googleAuth.tier || "Google AI Pro"}</span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-slate-500">Fleet Status:</span>
+              <span className="text-emerald-400">
+                {googleAuth.last_synced ? `Synced at ${new Date(googleAuth.last_synced * 1000).toLocaleTimeString()}` : "Active on cluster"}
+              </span>
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2.5 pt-1">
+          <button
+            type="button"
+            onClick={handleConnectGoogle}
+            disabled={loadingGoogle}
+            className="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium text-xs shadow-lg shadow-blue-600/25 flex items-center gap-2 transition-all disabled:opacity-50"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>{googleAuth?.authenticated ? "Reconnect / Switch Google Account" : "Connect Google Account"}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleSyncFleet}
+            disabled={syncingGoogle}
+            className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-800 font-medium text-xs flex items-center gap-2 transition-all disabled:opacity-50"
+            title="Push workspace credentials to all active container nodes"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-blue-400 ${syncingGoogle ? "animate-spin" : ""}`} />
+            <span>{syncingGoogle ? "Syncing Fleet..." : "Sync All Agents"}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowManualGoogle(!showManualGoogle)}
+            className="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 border border-slate-800 font-medium text-xs flex items-center gap-1.5 transition-all"
+          >
+            <Code2 className="w-3.5 h-3.5" />
+            <span>Paste Token JSON</span>
+          </button>
+
+          {googleAuth?.authenticated && (
+            <button
+              type="button"
+              onClick={handleDisconnectGoogle}
+              className="px-3 py-2 rounded-xl hover:bg-red-950/40 text-red-400 border border-transparent hover:border-red-800/60 font-medium text-xs flex items-center gap-1.5 transition-all ml-auto"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Disconnect</span>
+            </button>
+          )}
+        </div>
+
+        {showManualGoogle && (
+          <form onSubmit={handleSaveManualToken} className="pt-2 space-y-3 border-t border-slate-800/80">
+            <p className="text-[11px] text-slate-400">
+              Paste an OAuth Token JSON below. It will be stored in the workspace vault and broadcasted across all cluster nodes:
+            </p>
+            <textarea
+              rows={3}
+              value={manualToken}
+              onChange={(e) => setManualToken(e.target.value)}
+              placeholder='{"token": {"access_token": "ya29...", "token_type": "Bearer", "refresh_token": "..."}}'
+              className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono text-slate-200 focus:outline-none focus:border-indigo-500 resize-none"
+            />
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={loadingGoogle || !manualToken.trim()}
+                className="px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs shadow-lg shadow-indigo-600/25 flex items-center gap-1.5 transition-all disabled:opacity-50"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Save & Broadcast to Fleet</span>
+              </button>
+            </div>
+          </form>
+        )}
       </div>
 
       {/* Git Credentials & Private Repo Authentication */}
