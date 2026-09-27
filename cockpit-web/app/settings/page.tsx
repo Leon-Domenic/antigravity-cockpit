@@ -496,6 +496,7 @@ function SettingsView({ gitConfig, users }: { gitConfig: any; users: any[] }) {
           </div>
         </form>
       </div>
+      </div>
 
       {/* Cluster Users & Roles */}
       <div className="glass-panel p-6 rounded-2xl border border-slate-800 shadow-xl space-y-4">
