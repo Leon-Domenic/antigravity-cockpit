@@ -12,7 +12,8 @@ import {
   Settings, 
   LogOut, 
   Activity,
-  Zap
+  Zap,
+  AppWindow
 } from "lucide-react";
 
 export function Navbar() {
@@ -25,6 +26,7 @@ export function Navbar() {
   const navLinks = [
     { href: "/fleet", label: t("nav.fleet"), icon: Server },
     { href: "/workspaces", label: t("nav.workspaces"), icon: FolderGit2 },
+    { href: "/webos", label: "WebOS", icon: AppWindow },
     { href: "/ceo", label: t("nav.ceo"), icon: Cpu },
     { href: "/settings", label: t("nav.settings"), icon: Settings },
   ];

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useQuery } from "convex/react";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { api } from "@/convex/_generated/api";
@@ -24,7 +25,8 @@ import {
   Sparkles,
   Radio,
   Layers,
-  FolderTree
+  FolderTree,
+  AppWindow
 } from "lucide-react";
 import { QueryErrorBoundary } from "@/components/QueryErrorBoundary";
 
@@ -291,6 +293,16 @@ function FleetView({ rawAgents }: { rawAgents: any[] | undefined | null }) {
               <span>Node Specs</span>
             </button>
           </div>
+
+          {/* WebOS Puter Direct Link */}
+          <Link
+            href="/webos"
+            className="px-3 py-1.5 rounded-xl border border-cyan-500/30 bg-cyan-950/40 hover:bg-cyan-900/50 text-cyan-300 text-xs font-medium transition-all flex items-center gap-1.5 shadow-md shadow-cyan-950/40"
+            title="Launch Puter WebOS Environment"
+          >
+            <AppWindow className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Launch WebOS</span>
+          </Link>
 
           {/* Direct LAN vs SSL Gateway Toggle */}
           <button
