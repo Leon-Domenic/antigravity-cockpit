@@ -386,7 +386,7 @@ function FleetView({ rawAgents }: { rawAgents: any[] | undefined | null }) {
             </span>
           </div>
 
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+          <div className="grid grid-cols-2 gap-4 lg:gap-6">
             {agents.map((ag) => {
               const isKvm = ag.vmType === "qemu";
               const isRunning = ag.status === "running" || ag.status === "idle";
@@ -400,17 +400,17 @@ function FleetView({ rawAgents }: { rawAgents: any[] | undefined | null }) {
                 >
                   {/* Stream Card Header */}
                   <div className="px-4 py-2.5 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between">
-                    <div className="flex items-center space-x-2.5">
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                      <span className="text-xs font-bold text-white">{ag.name}</span>
-                      <span className={`text-[10px] font-mono uppercase px-1.5 py-0.5 rounded font-semibold ${
+                    <div className="flex items-center space-x-2 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse flex-shrink-0"></span>
+                      <span className="text-xs font-bold text-white truncate max-w-[140px] sm:max-w-[200px]" title={ag.name}>{ag.name}</span>
+                      <span className={`text-[10px] font-mono uppercase px-1.5 py-0.5 rounded font-semibold flex-shrink-0 ${
                         isKvm
                           ? "bg-purple-950/80 text-purple-400 border border-purple-800/60"
                           : "bg-blue-950/80 text-blue-400 border border-blue-800/60"
                       }`}>
                         VMID {ag.vmid} • {isKvm ? "KVM QEMU" : "LXC"}
                       </span>
-                      <span className="text-[10px] text-slate-400 font-mono hidden sm:inline">
+                      <span className="text-[10px] text-slate-400 font-mono hidden md:inline flex-shrink-0">
                         {ag.ip}:{ag.vncPort || 6080}
                       </span>
                     </div>
@@ -464,7 +464,7 @@ function FleetView({ rawAgents }: { rawAgents: any[] | undefined | null }) {
 
                   {/* Stream Card Bottom Command Bar */}
                   <div className="p-3 bg-slate-900/60 border-t border-slate-800/80 flex items-center justify-between gap-3">
-                    <div className="flex-1 flex items-center gap-2">
+                    <div className="flex-1 flex items-center gap-2 min-w-0">
                       <Terminal className="w-3.5 h-3.5 text-blue-400 flex-shrink-0" />
                       <input
                         type="text"
@@ -472,7 +472,7 @@ function FleetView({ rawAgents }: { rawAgents: any[] | undefined | null }) {
                         onChange={(e) => setAgentPrompts({ ...agentPrompts, [ag.agentId]: e.target.value })}
                         onKeyDown={(e) => { if (e.key === "Enter") handleDispatchAgentPrompt(ag); }}
                         placeholder={`Direct task for ${ag.name}...`}
-                        className="w-full bg-slate-950/80 border border-slate-800 rounded-lg px-2.5 py-1 text-[11px] font-mono text-slate-200 focus:outline-none focus:border-blue-500"
+                        className="w-full min-w-0 bg-slate-950/80 border border-slate-800 rounded-lg px-2.5 py-1 text-[11px] font-mono text-slate-200 focus:outline-none focus:border-blue-500"
                       />
                       <button
                         onClick={() => handleDispatchAgentPrompt(ag)}
