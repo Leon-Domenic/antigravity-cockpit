@@ -54,6 +54,13 @@ function SettingsView({ gitConfig, users }: { gitConfig: any; users: any[] }) {
   const [manualToken, setManualToken] = useState("");
   const [showManualGoogle, setShowManualGoogle] = useState(false);
 
+  // Google Cloud OAuth App (Option 3)
+  const [showOAuthConfig, setShowOAuthConfig] = useState(false);
+  const [oauthClientId, setOauthClientId] = useState("");
+  const [oauthClientSecret, setOauthClientSecret] = useState("");
+  const [savingOAuthConfig, setSavingOAuthConfig] = useState(false);
+  const [hasCustomSecret, setHasCustomSecret] = useState(false);
+
   const fetchGoogleAuth = async () => {
     try {
       const res = await fetch("/api/google/auth");
@@ -66,8 +73,24 @@ function SettingsView({ gitConfig, users }: { gitConfig: any; users: any[] }) {
     }
   };
 
+  const fetchOAuthConfig = async () => {
+    try {
+      const res = await fetch("/api/google/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "get_oauth_config" }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.client_id) setOauthClientId(data.client_id);
+        setHasCustomSecret(Boolean(data.has_secret));
+      }
+    } catch (e) {}
+  };
+
   useEffect(() => {
     fetchGoogleAuth();
+    fetchOAuthConfig();
     const interval = setInterval(fetchGoogleAuth, 10000);
 
     const onMessage = (e: MessageEvent) => {
@@ -175,6 +198,35 @@ function SettingsView({ gitConfig, users }: { gitConfig: any; users: any[] }) {
       fetchGoogleAuth();
     } catch (err: any) {
       setNotice("Failed: " + err.message);
+    }
+  };
+
+  const handleSaveOAuthConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!oauthClientId.trim()) return;
+    setSavingOAuthConfig(true);
+    try {
+      const res = await fetch("/api/google/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "save_oauth_config",
+          client_id: oauthClientId.trim(),
+          client_secret: oauthClientSecret.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setNotice("Google Cloud OAuth Client credentials saved! Redirect URI is ready.");
+        setHasCustomSecret(Boolean(data.has_secret));
+        setShowOAuthConfig(false);
+      } else {
+        setNotice("Error: " + (data.error || "Failed to save OAuth credentials"));
+      }
+    } catch (err: any) {
+      setNotice("Error: " + err.message);
+    } finally {
+      setSavingOAuthConfig(false);
     }
   };
 
@@ -375,6 +427,16 @@ function SettingsView({ gitConfig, users }: { gitConfig: any; users: any[] }) {
             <span>Paste Token JSON</span>
           </button>
 
+          <button
+            type="button"
+            onClick={() => setShowOAuthConfig(!showOAuthConfig)}
+            className="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-indigo-400 border border-slate-800 font-medium text-xs flex items-center gap-1.5 transition-all"
+            title="Configure Google Cloud OAuth Client ID & Secret for 1-click web popup"
+          >
+            <Key className="w-3.5 h-3.5" />
+            <span>Google Cloud App (Option 3)</span>
+          </button>
+
           {googleAuth?.authenticated && (
             <button
               type="button"
@@ -386,6 +448,62 @@ function SettingsView({ gitConfig, users }: { gitConfig: any; users: any[] }) {
             </button>
           )}
         </div>
+
+        {showOAuthConfig && (
+          <form onSubmit={handleSaveOAuthConfig} className="pt-3 space-y-3.5 border-t border-slate-800/80">
+            <div className="p-3 rounded-xl bg-indigo-950/30 border border-indigo-800/50 space-y-1.5">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-indigo-300">
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>Google Cloud Console Setup (Option 3)</span>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Create an <strong>OAuth 2.0 Client ID</strong> (Application type: <em>Web application</em>) in your Google Cloud Console. Add the following Authorized Redirect URI:
+              </p>
+              <div className="flex items-center gap-2 p-2 rounded-lg bg-slate-950/80 border border-slate-800 font-mono text-[11px] text-emerald-400 select-all">
+                <span>https://workspace.webigo.ai/api/google/auth/callback</span>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div>
+                <label className="text-[11px] font-mono text-slate-400 block mb-1">
+                  Google Client ID (.apps.googleusercontent.com)
+                </label>
+                <input
+                  type="text"
+                  value={oauthClientId}
+                  onChange={(e) => setOauthClientId(e.target.value)}
+                  placeholder="123456789-abcdef.apps.googleusercontent.com"
+                  className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono text-slate-200 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-mono text-slate-400 block mb-1">
+                  Google Client Secret {hasCustomSecret && <span className="text-emerald-400 text-[10px]">(Configured)</span>}
+                </label>
+                <input
+                  type="password"
+                  value={oauthClientSecret}
+                  onChange={(e) => setOauthClientSecret(e.target.value)}
+                  placeholder={hasCustomSecret ? "••••••••••••••••••••••••••••••••" : "GOCSPX-..."}
+                  className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono text-slate-200 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-1">
+              <button
+                type="submit"
+                disabled={savingOAuthConfig || !oauthClientId.trim()}
+                className="px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs shadow-lg shadow-indigo-600/25 flex items-center gap-1.5 transition-all disabled:opacity-50"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>{savingOAuthConfig ? "Saving..." : "Save OAuth App Credentials"}</span>
+              </button>
+            </div>
+          </form>
+        )}
 
         {showManualGoogle && (
           <form onSubmit={handleSaveManualToken} className="pt-2 space-y-3 border-t border-slate-800/80">

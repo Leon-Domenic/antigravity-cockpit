@@ -469,10 +469,47 @@ load_git_config()
 GOOGLE_AUTH_FILE = os.path.join(WORKSPACES_DIR, "google_auth.json")
 DEFAULT_JETSKI_TOKEN_FILE = "/usr/local/share/cockpit/default_jetski_token.json"
 
-import base64
+GOOGLE_OAUTH_CONFIG_FILE = os.path.join(WORKSPACES_DIR, "google_oauth_config.json")
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID") or base64.b64decode(b"MTA3MTAwNjA2MDU5MS10bWhzc2luMmgyMWxjcmUyMzV2dG9sb2poNGc0MDNlcC5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbQ==").decode()
 GOOGLE_OAUTH_CLIENT_SECRET = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET") or base64.b64decode(b"R09DU1BYLUs1OEZXUjQ4NkxkTExKMW1MQjhzWEM0ejZxREFm").decode()
 GOOGLE_SCOPES = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
+
+def load_google_oauth_config():
+    global GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET
+    if os.path.exists(GOOGLE_OAUTH_CONFIG_FILE):
+        try:
+            with open(GOOGLE_OAUTH_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if data.get("client_id"):
+                    GOOGLE_OAUTH_CLIENT_ID = data["client_id"].strip()
+                if data.get("client_secret"):
+                    GOOGLE_OAUTH_CLIENT_SECRET = data["client_secret"].strip()
+        except Exception as e:
+            print("Failed to load google_oauth_config.json:", e)
+
+def save_google_oauth_config(client_id, client_secret=None):
+    global GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET
+    if client_id:
+        GOOGLE_OAUTH_CLIENT_ID = client_id.strip()
+    if client_secret:
+        GOOGLE_OAUTH_CLIENT_SECRET = client_secret.strip()
+    try:
+        os.makedirs(os.path.dirname(GOOGLE_OAUTH_CONFIG_FILE), exist_ok=True)
+        with open(GOOGLE_OAUTH_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "client_id": GOOGLE_OAUTH_CLIENT_ID,
+                "client_secret": GOOGLE_OAUTH_CLIENT_SECRET
+            }, f, indent=2)
+        try:
+            os.chmod(GOOGLE_OAUTH_CONFIG_FILE, 0o600)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        print("Failed to save google_oauth_config.json:", e)
+        return False
+
+load_google_oauth_config()
 
 GOOGLE_AUTH = {
     "configured": False,
@@ -9350,18 +9387,41 @@ def set_google_auth():
         "fleet_sync": sync_results
     })
 
+@app.route("/api/google/auth/oauth_config", methods=["GET", "POST"])
+@require_auth
+def handle_google_oauth_config():
+    load_google_oauth_config()
+    if request.method == "POST":
+        data = request.get_json(force=True, silent=True) or {}
+        client_id = (data.get("client_id") or "").strip()
+        client_secret = (data.get("client_secret") or "").strip()
+        if not client_id:
+            return jsonify({"error": "client_id is required"}), 400
+        ok = save_google_oauth_config(client_id, client_secret)
+        if ok:
+            return jsonify({
+                "success": True,
+                "message": "Custom Google Cloud OAuth Web App configuration saved!",
+                "client_id": GOOGLE_OAUTH_CLIENT_ID,
+                "has_secret": bool(GOOGLE_OAUTH_CLIENT_SECRET),
+                "redirect_uri": "https://workspace.webigo.ai/api/google/auth/callback"
+            })
+        return jsonify({"error": "Failed to save configuration"}), 500
+
+    return jsonify({
+        "success": True,
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "has_secret": bool(GOOGLE_OAUTH_CLIENT_SECRET),
+        "redirect_uri": "https://workspace.webigo.ai/api/google/auth/callback"
+    })
+
 @app.route("/api/google/auth/login_url", methods=["GET"])
 @require_auth
 def get_google_auth_login_url():
     import urllib.parse
-    host = request.host
-    scheme = "https" if request.is_secure or "workspaces.webigo.ai" in host else "http"
-    callback_url = f"{scheme}://{host}/api/google/auth/callback"
+    load_google_oauth_config()
+    callback_url = request.args.get("redirect_uri") or "https://workspace.webigo.ai/api/google/auth/callback"
     
-    custom_cb = request.args.get("redirect_uri")
-    if custom_cb:
-        callback_url = custom_cb
-
     params = {
         "client_id": GOOGLE_OAUTH_CLIENT_ID,
         "redirect_uri": callback_url,
@@ -9376,6 +9436,64 @@ def get_google_auth_login_url():
         "auth_url": auth_url,
         "client_id": GOOGLE_OAUTH_CLIENT_ID,
         "redirect_uri": callback_url
+    })
+
+@app.route("/api/google/auth/exchange_code", methods=["POST"])
+@require_auth
+def handle_google_exchange_code():
+    load_google_oauth_config()
+    data = request.get_json(force=True, silent=True) or {}
+    code = data.get("code")
+    redirect_uri = data.get("redirect_uri") or "https://workspace.webigo.ai/api/google/auth/callback"
+    if not code:
+        return jsonify({"error": "Authorization code is required"}), 400
+
+    import urllib.request, urllib.parse
+    token_data = {
+        "client_id": GOOGLE_OAUTH_CLIENT_ID,
+        "client_secret": GOOGLE_OAUTH_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri
+    }
+    encoded = urllib.parse.urlencode(token_data).encode("utf-8")
+    req = urllib.request.Request("https://oauth2.googleapis.com/token", data=encoded, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            t_res = json.loads(resp.read().decode())
+    except Exception as e:
+        err_msg = str(e)
+        if hasattr(e, "read"):
+            err_msg += " - " + e.read().decode("utf-8", errors="ignore")
+        return jsonify({"error": f"Token exchange failed: {err_msg}"}), 400
+
+    acc = t_res.get("access_token")
+    ref = t_res.get("refresh_token")
+    expires_in = t_res.get("expires_in", 3600)
+    exp_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + expires_in))
+
+    prof = fetch_google_user_profile(acc)
+
+    GOOGLE_AUTH.update({
+        "configured": True,
+        "access_token": acc,
+        "refresh_token": ref or GOOGLE_AUTH.get("refresh_token", ""),
+        "token_type": "Bearer",
+        "expiry": exp_iso,
+        "email": prof.get("email", ""),
+        "name": prof.get("name", ""),
+        "picture": prof.get("picture", ""),
+        "tier": prof.get("tier", "Antigravity"),
+        "updated_at": time.time(),
+        "auth_method": "consumer"
+    })
+    save_google_auth(GOOGLE_AUTH)
+    sync_res = push_google_auth_to_fleet(GOOGLE_AUTH)
+    return jsonify({
+        "success": True,
+        "message": "Google Account connected and synced across cluster!",
+        "profile": prof,
+        "fleet_sync": sync_res
     })
 
 @app.route("/api/google/auth/callback", methods=["GET"])

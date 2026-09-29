@@ -78,6 +78,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Failed to reach Cockpit login URL endpoint" }, { status: 502 });
     }
 
+    if (action === "get_oauth_config") {
+      const res = await fetchCockpit("/api/google/auth/oauth_config");
+      if (res && res.ok) return NextResponse.json(await res.json());
+      return NextResponse.json({
+        client_id: "",
+        has_secret: false,
+        redirect_uri: "https://workspace.webigo.ai/api/google/auth/callback"
+      });
+    }
+
+    if (action === "save_oauth_config") {
+      const { client_id, client_secret } = body;
+      const res = await fetchCockpit("/api/google/auth/oauth_config", {
+        method: "POST",
+        body: JSON.stringify({ client_id, client_secret }),
+      });
+      if (res && res.ok) return NextResponse.json(await res.json());
+      return NextResponse.json({ error: "Failed to save OAuth configuration" }, { status: 502 });
+    }
+
     if (action === "sync") {
       const res = await fetchCockpit("/api/google/auth/sync", { method: "POST" });
       if (res && res.ok) return NextResponse.json(await res.json());
