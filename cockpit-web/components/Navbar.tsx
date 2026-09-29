@@ -58,7 +58,7 @@ export function Navbar() {
         </div>
 
         {/* Navigation Tabs */}
-        <nav className="flex items-center gap-1">
+        <nav className="flex items-center gap-1 overflow-x-auto max-w-full">
           {navLinks.map((link) => {
             const Icon = link.icon;
             const isActive = pathname.startsWith(link.href);
